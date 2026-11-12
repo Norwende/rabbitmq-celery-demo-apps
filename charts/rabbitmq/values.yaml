@@ -1,0 +1,51 @@
+# Valeurs par défaut du chart rabbitmq (dimensionnées pour un poste de développement).
+# Les noms des objets sont fixes (RabbitmqCluster/rabbitmq, Service rabbitmq, PDB rabbitmq,
+# cf. docs/contracts.md) : une seule installation par namespace (orderflow-infra par défaut).
+# L'utilisateur applicatif "orderflow" n'est pas créé ici : scripts/deploy-apps.ps1 le
+# provisionne (rabbitmqctl) et range ses identifiants dans le namespace des applications.
+
+# Image des nœuds : [<registry>/]<repository>:<tag> (registry vide = Docker Hub). Registre
+# interne : copier l'image telle quelle puis renseigner registry et, si besoin,
+# imagePullSecrets (cf. docs/exploitation.md, « Environnement restreint »). L'image de
+# l'opérateur lui-même se règle dans k8s/operators/ (manifeste à vendoriser).
+image:
+  registry: ""
+  repository: rabbitmq
+  tag: 4.3.7-management
+# Secrets (type kubernetes.io/dockerconfigjson) du namespace, ex. [{name: registry-pull}] :
+# transmis au RabbitmqCluster (spec.imagePullSecrets).
+imagePullSecrets: []
+replicas: 3
+resources:
+  requests:
+    cpu: 100m
+    memory: 400Mi
+  limits:
+    # Pas de limite CPU (évite le throttling d'Erlang). L'opérateur dérive
+    # total_memory_available_override_value de cette limite mémoire.
+    memory: 600Mi
+persistence:
+  # Vide = StorageClass par défaut du cluster (local-path sur k3s / Rancher Desktop).
+  storageClassName: ""
+  size: 1Gi
+# Défaut opérateur = 7 jours (attente de la resynchro des quorum queues au preStop).
+# 5 min suffisent pour une démo sur un seul nœud et ne bloquent pas un rollout raté.
+terminationGracePeriodSeconds: 300
+# rabbitmq_management, rabbitmq_prometheus et rabbitmq_peer_discovery_k8s sont activés
+# d'office par l'opérateur (cf. ConfigMap/rabbitmq-plugins-conf) : seuls les plugins
+# stream sont à ajouter.
+additionalPlugins:
+  - rabbitmq_stream
+  - rabbitmq_stream_management
+# default_queue_type volontairement NON forcé à quorum : c'est le contrat qui impose
+# x-queue-type=quorum aux files de tâches, et le stream orders.events est déclaré
+# explicitement. Les files transitoires non exclusives (feature dépréciée) restent
+# refusées (défaut 4.x) : aucune application n'en crée. consumer_timeout : défaut (30 min).
+additionalConfig: |
+  # Partition réseau : la minorité se met en pause plutôt que de diverger.
+  cluster_partition_handling = pause_minority
+  # Watermark relatif à total_memory_available_override_value (fixé par l'opérateur
+  # à partir de limits.memory) : alarme mémoire vers ~290 Mi, bien sous la limite cgroup.
+  vm_memory_high_watermark.relative = 0.6
+  # Le PV local partage le disque de l'hôte : seuil absolu modeste.
+  disk_free_limit.absolute = 256MB

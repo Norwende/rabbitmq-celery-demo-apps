@@ -2,8 +2,9 @@ apiVersion: v2
 name: orderflow
 description: >-
   Applications OrderFlow : gateway FastAPI, workers Celery (payments, inventory, notifier),
-  scheduler (Celery beat) et abonnés du stream orders.events. Requiert la release
-  orderflow-infra dans le même namespace (Secret/rabbitmq-default-user, Secret/redis-auth).
+  scheduler (Celery beat) et abonnés du stream orders.events. Requiert les releases rabbitmq
+  et redis (namespace infraNamespace) et, dans son propre namespace, les Secrets
+  rabbitmq-credentials et redis-credentials (provisionnés par scripts/deploy-apps.ps1).
 type: application
 version: 0.1.0
 # Tag par défaut des images orderflow/<service> (image.tag vide => appVersion).

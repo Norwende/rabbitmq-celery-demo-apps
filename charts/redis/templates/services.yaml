@@ -6,14 +6,14 @@ kind: Service
 metadata:
   name: redis-headless
   labels:
-    {{- include "orderflow-infra.labels" . | nindent 4 }}
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.labels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: cache
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
   ports:
     - name: redis
       port: 6379
@@ -22,20 +22,22 @@ spec:
       port: 26379
       targetPort: sentinel
 ---
-# Point d'entrée Sentinel pour les clients (REDIS_SENTINELS=redis-sentinel:26379).
-# Pas de Service "master" : les clients découvrent le master via Sentinel.
+# Point d'entrée Sentinel pour les clients, y compris depuis un autre namespace
+# (REDIS_SENTINELS=redis-sentinel.<namespace>.svc.cluster.local:26379). Pas de Service
+# "master" : les clients découvrent le master via Sentinel, qui leur répond par le FQDN du
+# pod (redis-N.redis-headless.<namespace>.svc.<domaine>), résolvable de tout namespace.
 apiVersion: v1
 kind: Service
 metadata:
   name: redis-sentinel
   labels:
-    {{- include "orderflow-infra.labels" . | nindent 4 }}
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.labels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: sentinel
 spec:
   type: ClusterIP
   selector:
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
   ports:
     - name: sentinel
       port: 26379

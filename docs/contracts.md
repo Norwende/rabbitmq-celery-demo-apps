@@ -17,39 +17,60 @@ OrderFlow traite des commandes e-commerce :
 6. le **scheduler** (Celery beat) envoie chaque minute, par nom, `notifications.sales_digest` :
    `worker-notifier` lit les agrégats d'analytics et publie un **digest** dans le même stream.
 
-## 2. Infrastructure (namespace `orderflow`)
+## 2. Infrastructure et namespaces
 
-| Ressource | Nom | Détail | Créé par |
-|---|---|---|---|
-| RabbitMQ (3 nœuds, Cluster Operator) | `RabbitmqCluster/rabbitmq` | Service AMQP `rabbitmq:5672`, management `rabbitmq:15672` | release `orderflow-infra` (Services et StatefulSet `rabbitmq-server` : l'opérateur) |
-| Identifiants RabbitMQ | `Secret/rabbitmq-default-user` | clés `username`, `password` (généré par l'opérateur) | opérateur |
-| Redis (3 pods : redis + sentinel) | `StatefulSet/redis` | Service headless `redis-headless` | release `orderflow-infra` |
-| Sentinel | `Service/redis-sentinel:26379` | master name : `orderflow` | release `orderflow-infra` |
-| Mot de passe Redis (+ Sentinel) | `Secret/redis-auth` | clé `password` | release `orderflow-infra` (généré puis conservé, ou `redis.auth.existingSecret`) |
-| Configuration applicative | `ConfigMap/orderflow-config` | variables ci-dessous | release `orderflow` (values `rabbitmq.*`, `redis.*`, `logLevel`) |
+L'infrastructure et les applications vivent dans deux namespaces (noms par défaut, modifiables
+par les paramètres `-InfraNamespace` / `-Namespace` des scripts et la value `infraNamespace`
+du chart `orderflow`) :
+
+| Namespace | Releases Helm | Contenu |
+|---|---|---|
+| `orderflow-infra` | `rabbitmq` (`charts/rabbitmq`), `redis` (`charts/redis`) | broker, result backend, leurs données et leurs Secrets |
+| `orderflow` | `orderflow` (`charts/orderflow`) | les 8 Deployments applicatifs, leur configuration et leurs identifiants |
+
+| Ressource | Namespace | Nom | Détail | Créé par |
+|---|---|---|---|---|
+| RabbitMQ (3 nœuds) | `orderflow-infra` | `StatefulSet/rabbitmq-server` (variante par défaut : via `RabbitmqCluster/rabbitmq`) | Service AMQP `rabbitmq.orderflow-infra.svc.cluster.local:5672`, management `:15672` ; mêmes noms dans les deux variantes | release `rabbitmq` : chart `rabbitmq` (Services et StatefulSet créés par l'opérateur) ou `rabbitmq-standalone` (sans opérateur, tout créé par Helm) |
+| Administrateur RabbitMQ | `orderflow-infra` | `Secret/rabbitmq-default-user` | clés `username`, `password` ; réservé à l'exploitation, **jamais utilisé par les applications** | opérateur, ou chart `rabbitmq-standalone` (généré puis conservé) |
+| Utilisateur RabbitMQ applicatif | (dans RabbitMQ) | utilisateur `orderflow` | aucun tag (ni `administrator` ni `management`), permissions `configure` / `write` / `read` `.*` sur le vhost `/` | `scripts/deploy-apps.ps1` (`rabbitmqctl`) |
+| Redis (3 pods : redis + sentinel) | `orderflow-infra` | `StatefulSet/redis` | Service headless `redis-headless` ; pods `redis-N.redis-headless.orderflow-infra.svc.cluster.local` | release `redis` |
+| Sentinel | `orderflow-infra` | `Service/redis-sentinel:26379` | `redis-sentinel.orderflow-infra.svc.cluster.local` ; master name : `orderflow` | release `redis` |
+| Mot de passe Redis (+ Sentinel) | `orderflow-infra` | `Secret/redis-auth` | clé `password` | release `redis` (généré puis conservé, ou `auth.existingSecret`) |
+| Identifiants RabbitMQ des applications | `orderflow` | `Secret/rabbitmq-credentials` | clés `username` (`orderflow`), `password` (aléatoire, généré une fois) | `scripts/deploy-apps.ps1` |
+| Mot de passe Redis des applications | `orderflow` | `Secret/redis-credentials` | clé `password` : copie de `orderflow-infra/redis-auth`, resynchronisée à chaque déploiement | `scripts/deploy-apps.ps1` |
+| Configuration applicative | `orderflow` | `ConfigMap/orderflow-config` | variables ci-dessous | release `orderflow` (values `infraNamespace`, `clusterDomain`, `rabbitmq.*`, `redis.*`, `logLevel`) |
 
 Ces noms sont fixes dans les charts (pas de préfixe de release) : ils font partie du contrat.
+Un Secret ne peut être référencé que par un pod de son namespace : c'est pourquoi les
+applications ne lisent ni `rabbitmq-default-user` ni `redis-auth`, mais les deux Secrets de
+leur namespace (noms configurables : values `rabbitmq.secretName` et `redis.secretName`).
+Le chart `orderflow` refuse de s'installer s'ils manquent (cf. [ADR-17](architecture.md#adr-17--identifiants-des-applications-utilisateur-rabbitmq-dédié-et-secrets-provisionnés-par-script)).
 
 ### Variables d'environnement communes à toutes les applications
 
 | Variable | Exemple | Source |
 |---|---|---|
-| `RABBITMQ_HOST` | `rabbitmq` | ConfigMap |
+| `RABBITMQ_HOST` | `rabbitmq.orderflow-infra.svc.cluster.local` | ConfigMap (value `rabbitmq.host`, vide = dérivé de `infraNamespace` et `clusterDomain`) |
 | `RABBITMQ_PORT` | `5672` | ConfigMap |
 | `RABBITMQ_VHOST` | `/` | ConfigMap |
-| `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | — | Secret `rabbitmq-default-user` |
-| `REDIS_SENTINELS` | `redis-sentinel:26379` (liste `hôte:port` séparée par des virgules acceptée) | ConfigMap |
+| `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | `orderflow` / — | Secret `rabbitmq-credentials` (namespace des applications) |
+| `REDIS_SENTINELS` | `redis-sentinel.orderflow-infra.svc.cluster.local:26379` (liste `hôte:port` séparée par des virgules acceptée) | ConfigMap (value `redis.sentinels`, vide = dérivé) |
 | `REDIS_MASTER_NAME` | `orderflow` | ConfigMap |
-| `REDIS_PASSWORD` | — | Secret `redis-auth` |
+| `REDIS_PASSWORD` | — | Secret `redis-credentials` (namespace des applications) |
 | `REDIS_DB` | `0` | ConfigMap |
 | `LOG_LEVEL` | `INFO` | ConfigMap |
 
 Chaque application construit elle-même ses URLs (`amqp://…`, `sentinel://…`) à partir de ces variables.
-Le scheduler ne parle qu'au broker : il ne lit que `RABBITMQ_*` et `LOG_LEVEL`.
+Le scheduler ne parle qu'au broker : il ne lit que `RABBITMQ_*` et `LOG_LEVEL`. Les noms des
+variables n'ont pas changé avec la séparation des namespaces : seules leurs valeurs (noms DNS
+complets, Secrets locaux) diffèrent, et `dev/docker-compose.yml` reste valable tel quel.
 
-`REDIS_SENTINELS` désigne le Service `redis-sentinel`, qui ne route que vers les pods Redis
-prêts : la découverte du master ne tente jamais un pod supprimé (mesure : cf.
-[exploitation.md, Test de chaos](exploitation.md#test-de-chaos)).
+Les noms DNS sont **complets** (`<service>.<namespace>.svc.<domaine>`) : un nom court
+(`rabbitmq`) ne se résout que dans le namespace du Service. `REDIS_SENTINELS` désigne le
+Service `redis-sentinel`, qui ne route que vers les pods Redis prêts : la découverte du master
+ne tente jamais un pod supprimé (mesure : cf. [exploitation.md, Test de chaos](exploitation.md#test-de-chaos)).
+Sentinel répond par le FQDN du pod master (`redis-N.redis-headless.orderflow-infra.svc.cluster.local`,
+construit par le pod à partir de son namespace réel), résolvable depuis n'importe quel namespace.
 
 ### Variables optionnelles propres à un service
 
@@ -57,6 +78,7 @@ prêts : la découverte du master ne tente jamais un pod supprimé (mesure : cf.
 |---|---|---|---|
 | `WORKER_CONCURRENCY` | workers Celery | `2` | nombre de processus d'exécution du worker |
 | `ORDER_TTL_SECONDS` | gateway | `86400` | durée de vie de `order:<order_id>` et des résultats Celery émis par le gateway |
+| `LOG_FORMAT` | gateway | `json` | `json` (une ligne JSON par événement, structlog) ou `console` (lisible) ; value `gateway.logFormat` du chart. Les autres services gardent leur format texte |
 | `SUBSCRIBER_NAME`, `SUBSCRIBER_ROLE`, `STREAM_OFFSET`, `CHECKPOINT_ENABLED`, `PREFETCH_COUNT` | subscriber | cf. §4 | |
 | `DIGEST_CRON` | scheduler | `* * * * *` | crontab de `notifications.sales_digest` (`minute heure jour-du-mois mois jour-de-semaine`, **UTC**) |
 | `DIGEST_EXPIRES_SECONDS` | scheduler | `50` | `expires` des ticks envoyés (1 à 59, cf. §3) |
@@ -276,3 +298,8 @@ Réponse de `GET /orders/{order_id}` :
 
 Indisponibilité de l'infrastructure (broker ou Redis injoignable) : `503` avec un en-tête
 `Retry-After`, jamais une `500`.
+
+Corrélation : chaque réponse porte un en-tête `X-Request-ID`, celui de la requête s'il est
+fourni et valide (1 à 128 caractères parmi `A-Z a-z 0-9 . _ : -`), sinon un identifiant
+généré ; il figure dans toutes les lignes de journal du gateway liées à la requête
+(champ `request_id`).

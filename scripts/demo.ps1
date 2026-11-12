@@ -18,6 +18,10 @@
 
 .PARAMETER LogLines
   Nombre de lignes de log affichées par subscriber (défaut 4).
+.PARAMETER Namespace
+  Namespace des applications (défaut : orderflow).
+.PARAMETER InfraNamespace
+  Namespace de RabbitMQ et Redis (défaut : orderflow-infra).
 .PARAMETER Context
   Contexte kubectl à utiliser (défaut : contexte courant).
 .EXAMPLE
@@ -26,6 +30,8 @@
 [CmdletBinding()]
 param(
     [int]$LogLines = 4,
+    [string]$Namespace = 'orderflow',
+    [string]$InfraNamespace = 'orderflow-infra',
     [string]$Context = ''
 )
 

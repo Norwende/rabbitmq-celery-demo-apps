@@ -1,0 +1,17 @@
+apiVersion: v2
+name: rabbitmq-standalone
+description: >-
+  Broker d'OrderFlow SANS opérateur : cluster RabbitMQ 3 nœuds en StatefulSet, uniquement
+  des objets Kubernetes standard et namespacés (aucun CRD, aucun RBAC, aucun accès à l'API
+  Kubernetes : peer discovery classic_config). Remplaçant direct du chart rabbitmq (mêmes
+  noms d'objets) pour les environnements sans droit d'installer un opérateur. Installé dans
+  le namespace d'infrastructure (orderflow-infra), indépendamment du chart redis.
+type: application
+version: 0.1.0
+appVersion: "4.3.7"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - rabbitmq
+  - quorum-queues
+  - streams
+  - no-operator

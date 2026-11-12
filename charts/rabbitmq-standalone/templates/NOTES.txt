@@ -1,0 +1,25 @@
+RabbitMQ ({{ .Values.replicas }} nœuds, SANS opérateur) installé dans le namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+Image : {{ include "rabbitmq.image" . }}. Aucun CRD, aucun RBAC : peer discovery classic_config.
+
+Objets (mêmes noms que la variante opérateur) : StatefulSet/rabbitmq-server, Services rabbitmq et rabbitmq-nodes,
+Secret/{{ include "rabbitmq.adminSecret" . }} (administrateur), Secret/{{ include "rabbitmq.cookieSecret" . }}, ConfigMap/rabbitmq-config, PDB/rabbitmq.
+
+Vérifier la formation (chaque nœud doit voir les {{ .Values.replicas }} nœuds dans "Running Nodes", et aucun autre cluster) :
+  kubectl -n {{ .Release.Namespace }} rollout status statefulset/rabbitmq-server
+{{- range $i := until (int .Values.replicas) }}
+  kubectl -n {{ $.Release.Namespace }} exec rabbitmq-server-{{ $i }} -c rabbitmq -- rabbitmqctl cluster_status
+{{- end }}
+
+Adresse AMQP pour les applications d'un autre namespace :
+  rabbitmq.{{ .Release.Namespace }}.svc.cluster.local:5672
+
+Interface de management (identifiants administrateur, réservés à l'exploitation) :
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "rabbitmq.adminSecret" . }} -o jsonpath='{.data.username}'   # base64
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "rabbitmq.adminSecret" . }} -o jsonpath='{.data.password}'   # base64
+  kubectl -n {{ .Release.Namespace }} port-forward svc/rabbitmq 15672:15672   # puis http://localhost:15672
+
+Les Secrets et les PVC survivent à "helm uninstall" (réinstallation = mêmes données, même cookie).
+Changer de variante (opérateur <-> sans opérateur) : désinstaller d'abord, PVC compris (cf. docs/exploitation.md).
+
+Les applications n'utilisent PAS l'administrateur : ./scripts/deploy-apps.ps1 crée l'utilisateur dédié "orderflow"
+et range ses identifiants dans Secret/rabbitmq-credentials du namespace des applications.

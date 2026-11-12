@@ -1,6 +1,7 @@
 # Valeurs par défaut du chart orderflow (applications). Les noms des objets sont fixes
 # (gateway, worker-payments, orderflow-config…, cf. docs/contracts.md) : une seule
-# installation par namespace, à côté de la release orderflow-infra.
+# installation par namespace (orderflow par défaut). L'infrastructure (releases rabbitmq et
+# redis) vit dans un autre namespace (infraNamespace).
 
 # Images : [<registry>/]orderflow/<nom>:<tag>. Par défaut orderflow/<nom>:dev, construites
 # localement (scripts/build-images.ps1) et lues par k3s/Rancher Desktop dans le démon docker.
@@ -21,25 +22,40 @@ imageIds: {}
 # Configuration commune (ConfigMap/orderflow-config, cf. docs/contracts.md §2). Toute
 # modification relance les pods (annotation checksum/config).
 logLevel: INFO
+
+# Namespace de l'infrastructure (releases rabbitmq et redis) et domaine DNS du cluster :
+# les adresses par défaut de RabbitMQ et de Sentinel en sont dérivées (FQDN, joignables
+# depuis le namespace des applications).
+infraNamespace: orderflow-infra
+clusterDomain: cluster.local
+
 rabbitmq:
-  host: rabbitmq
+  # Vide => rabbitmq.<infraNamespace>.svc.<clusterDomain> (Service créé par l'opérateur).
+  host: ""
   port: 5672
   vhost: /
-  # Secret créé par le RabbitMQ Cluster Operator (clés username / password).
-  secretName: rabbitmq-default-user
+  # Secret du namespace des APPLICATIONS (clés username / password) : utilisateur dédié
+  # "orderflow", créé par scripts/deploy-apps.ps1 (rabbitmqctl). Un Secret ne peut pas être
+  # référencé depuis un autre namespace : rabbitmq-default-user (admin) n'est pas utilisé.
+  secretName: rabbitmq-credentials
 redis:
-  # Service ClusterIP plutôt que la liste des pods : il ne route que vers les pods Ready
-  # (un pod supprimé sort des endpoints immédiatement). Avec la liste redis-0..2, la perte
-  # de redis-0 coûtait ~5 s de résolution DNS du pod disparu (POST max 7,2 s contre 2,2 s).
-  sentinels: redis-sentinel:26379
+  # Vide => redis-sentinel.<infraNamespace>.svc.<clusterDomain>:26379. Service ClusterIP
+  # plutôt que la liste des pods : il ne route que vers les pods Ready (un pod supprimé sort
+  # des endpoints immédiatement). Avec la liste redis-0..2, la perte de redis-0 coûtait ~5 s
+  # de résolution DNS du pod disparu (POST max 7,2 s contre 2,2 s).
+  sentinels: ""
   masterName: orderflow
   db: 0
-  # Secret créé par orderflow-infra (clé password).
-  secretName: redis-auth
+  # Secret du namespace des APPLICATIONS (clé password) : copie de Secret/redis-auth du
+  # namespace d'infrastructure, resynchronisée par scripts/deploy-apps.ps1.
+  secretName: redis-credentials
 
 gateway:
   image: gateway
   replicas: 2
+  # LOG_FORMAT du gateway (structlog) : json (défaut, une ligne JSON par événement, pour la
+  # collecte de logs) ou console (lisible, pour le développement). LOG_LEVEL : logLevel.
+  logFormat: json
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {cpu: 500m, memory: 256Mi}

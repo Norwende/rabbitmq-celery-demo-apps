@@ -1,0 +1,14 @@
+apiVersion: v2
+name: rabbitmq
+description: >-
+  Broker d'OrderFlow : cluster RabbitMQ 3 nœuds (RabbitmqCluster du RabbitMQ Cluster
+  Operator, prérequis) et son PodDisruptionBudget. Installé dans le namespace
+  d'infrastructure (orderflow-infra), indépendamment du chart redis.
+type: application
+version: 0.1.0
+appVersion: "4.3.7"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - rabbitmq
+  - quorum-queues
+  - streams

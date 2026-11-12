@@ -1,0 +1,17 @@
+RabbitMQ ({{ .Values.replicas }} nœuds, géré par l'opérateur) installé dans le namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+L'opérateur crée StatefulSet/rabbitmq-server, Service/rabbitmq et Secret/rabbitmq-default-user (administrateur).
+--wait ne suit pas ce StatefulSet ; attendre explicitement :
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=AllReplicasReady rabbitmqcluster/rabbitmq --timeout=600s
+
+Adresse AMQP pour les applications d'un autre namespace :
+  rabbitmq.{{ .Release.Namespace }}.svc.cluster.local:5672
+
+Interface de management (identifiants administrateur, réservés à l'exploitation) :
+  kubectl -n {{ .Release.Namespace }} get secret rabbitmq-default-user -o jsonpath='{.data.username}'   # base64
+  kubectl -n {{ .Release.Namespace }} get secret rabbitmq-default-user -o jsonpath='{.data.password}'   # base64
+  kubectl -n {{ .Release.Namespace }} port-forward svc/rabbitmq 15672:15672   # puis http://localhost:15672
+
+Les applications n'utilisent PAS rabbitmq-default-user : ./scripts/deploy-apps.ps1 crée l'utilisateur dédié
+"orderflow" (sans tag d'administration, permissions sur le vhost /) et range ses identifiants dans
+Secret/rabbitmq-credentials du namespace des applications (cf. NOTES du chart orderflow pour l'équivalent manuel).

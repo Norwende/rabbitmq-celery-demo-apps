@@ -1,6 +1,7 @@
+{{- include "orderflow.credentialsCheck" . }}
 # Configuration commune à toutes les applications (cf. docs/contracts.md §2).
-# Les secrets (RABBITMQ_USER/PASSWORD, REDIS_PASSWORD) viennent de
-# Secret/rabbitmq-default-user et Secret/redis-auth (release orderflow-infra), pas d'ici.
+# Les secrets (RABBITMQ_USER/PASSWORD, REDIS_PASSWORD) viennent de Secret/{{ .Values.rabbitmq.secretName }}
+# et Secret/{{ .Values.redis.secretName }} de ce namespace (provisionnés par scripts/deploy-apps.ps1), pas d'ici.
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -1,6 +1,7 @@
 OrderFlow (images {{ include "orderflow.image" (dict "root" $ "image" "<service>") }}) déployé dans le namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
 
 Deployments : gateway ×{{ .Values.gateway.replicas }}{{ range $key, $w := .Values.workers }}, worker-{{ $key }} ×{{ $w.replicas }}{{ end }}, scheduler ×1{{ range $key, $s := .Values.subscribers }}, subscriber-{{ $key }}{{ end }}.
+Infrastructure : RabbitMQ {{ include "orderflow.rabbitmqHost" . }}:{{ .Values.rabbitmq.port }}, Sentinel {{ include "orderflow.redisSentinels" . }}.
 
 Gateway :
   kubectl -n {{ .Release.Namespace }} port-forward svc/gateway 8000:{{ .Values.gateway.service.port }}
@@ -10,6 +11,17 @@ Vérifier :
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}            # GET /readyz depuis le cluster
   kubectl -n {{ .Release.Namespace }} get deploy,pod -l app.kubernetes.io/instance={{ .Release.Name }}
   ./scripts/demo.ps1                                       # 3 commandes de bout en bout
+
+Identifiants (Secrets de CE namespace, lus par les pods ; une rotation relance les pods au helm upgrade suivant,
+annotation checksum/credentials) :
+  Secret/{{ .Values.rabbitmq.secretName }} (username, password) : utilisateur RabbitMQ dédié, sans droit d'administration
+  Secret/{{ .Values.redis.secretName }} (password)            : copie de Secret/redis-auth du namespace {{ .Values.infraNamespace }}
+./scripts/deploy-apps.ps1 les provisionne avant chaque helm upgrade. Équivalent manuel (bash ; mot de passe à générer) :
+  kubectl -n {{ .Values.infraNamespace }} exec rabbitmq-server-0 -c rabbitmq -- rabbitmqctl add_user orderflow "$PASS"
+  kubectl -n {{ .Values.infraNamespace }} exec rabbitmq-server-0 -c rabbitmq -- rabbitmqctl set_permissions -p / orderflow ".*" ".*" ".*"
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.rabbitmq.secretName }} --from-literal=username=orderflow --from-literal=password="$PASS"
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.redis.secretName }} \
+    --from-literal=password="$(kubectl -n {{ .Values.infraNamespace }} get secret redis-auth -o jsonpath='{.data.password}' | base64 -d)"
 
 Tag mutable "{{ include "orderflow.tag" . }}" : après un rebuild, ./scripts/deploy-apps.ps1 transmet l'empreinte du contenu
 de chaque image (imageIds) et seuls les pods dont l'image a changé sont relancés.

@@ -10,27 +10,29 @@ lookup renvoie toujours vide et les Capabilities sont celles par défaut de Helm
 {{- end }}
 # Cluster RabbitMQ géré par le RabbitMQ Cluster Operator. L'opérateur crée :
 # StatefulSet/rabbitmq-server, Service/rabbitmq (5672, 15672, 5552, 15692),
-# Service/rabbitmq-nodes (headless) et Secret/rabbitmq-default-user (username/password).
+# Service/rabbitmq-nodes (headless) et Secret/rabbitmq-default-user (administrateur,
+# réservé à l'exploitation : les applications utilisent leur propre utilisateur).
 apiVersion: rabbitmq.com/v1beta1
 kind: RabbitmqCluster
 metadata:
   name: rabbitmq
   labels:
-    {{- include "orderflow-infra.labels" . | nindent 4 }}
-    app.kubernetes.io/name: rabbitmq
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: broker
+    {{- include "rabbitmq.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.rabbitmq.replicas }}
-  image: {{ .Values.rabbitmq.image }}
+  replicas: {{ .Values.replicas }}
+  image: {{ with .Values.image.registry }}{{ trimSuffix "/" . }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   resources:
-    {{- toYaml .Values.rabbitmq.resources | nindent 4 }}
+    {{- toYaml .Values.resources | nindent 4 }}
   persistence:
-    {{- with .Values.rabbitmq.persistence.storageClassName }}
+    {{- with .Values.persistence.storageClassName }}
     storageClassName: {{ . }}
     {{- end }}
-    storage: {{ .Values.rabbitmq.persistence.size }}
-  terminationGracePeriodSeconds: {{ .Values.rabbitmq.terminationGracePeriodSeconds }}
+    storage: {{ .Values.persistence.size }}
+  terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
   # Un seul nœud k8s : rien de "required", sinon les pods 2 et 3 resteraient Pending.
   # Labels des pods posés par l'opérateur : app.kubernetes.io/name=rabbitmq.
   affinity:
@@ -44,9 +46,9 @@ spec:
                 app.kubernetes.io/name: rabbitmq
   rabbitmq:
     additionalPlugins:
-      {{- toYaml .Values.rabbitmq.additionalPlugins | nindent 6 }}
+      {{- toYaml .Values.additionalPlugins | nindent 6 }}
     additionalConfig: |
-      {{- .Values.rabbitmq.additionalConfig | trim | nindent 6 }}
+      {{- .Values.additionalConfig | trim | nindent 6 }}
   override:
     statefulSet:
       spec:

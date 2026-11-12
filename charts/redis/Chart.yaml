@@ -1,0 +1,13 @@
+apiVersion: v2
+name: redis
+description: >-
+  Result backend d'OrderFlow : Redis Sentinel en StatefulSet écrit à la main (1 master +
+  2 réplicas + 3 sentinels), Services, PDB et Secret/redis-auth. Installé dans le namespace
+  d'infrastructure (orderflow-infra), indépendamment du chart rabbitmq.
+type: application
+version: 0.1.0
+appVersion: "8.10.3"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - redis
+  - sentinel

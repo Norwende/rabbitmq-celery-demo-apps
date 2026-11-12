@@ -31,6 +31,10 @@
   Ne pas supprimer le master Redis.
 .PARAMETER SkipRabbit
   Ne pas supprimer rabbitmq-server-0.
+.PARAMETER Namespace
+  Namespace des applications (défaut : orderflow).
+.PARAMETER InfraNamespace
+  Namespace de RabbitMQ et Redis (défaut : orderflow-infra).
 .PARAMETER Context
   Contexte kubectl à utiliser (défaut : contexte courant).
 .EXAMPLE
@@ -43,6 +47,8 @@ param(
     [double]$Rate = 2,
     [switch]$SkipRedis,
     [switch]$SkipRabbit,
+    [string]$Namespace = 'orderflow',
+    [string]$InfraNamespace = 'orderflow-infra',
     [string]$Context = '',
     [int]$TimeoutSeconds = 300
 )
@@ -100,7 +106,7 @@ try {
         $elapsed = ((Get-Date) - $start).TotalSeconds
         if (-not $SkipRedis -and $null -eq $redisKilledAt -and $elapsed -ge $RedisKillAfterSeconds) {
             $victim = Get-RedisMasterPod
-            Invoke-Kubectl -n $Namespace delete pod $victim --wait=false | Out-Null
+            Invoke-Kubectl -n $InfraNamespace delete pod $victim --wait=false | Out-Null
             $redisKilledAt = $elapsed
             [void]$events.Add(('{0,5:N1} s  suppression du master Redis {1}' -f $elapsed, $victim))
             Write-Host "  [$('{0:N1}' -f $elapsed) s] pod $victim (master Redis) supprimé" -ForegroundColor Yellow
@@ -108,7 +114,7 @@ try {
         $rabbitDue = $RedisKillAfterSeconds + $RabbitKillDelaySeconds
         if ($null -ne $redisKilledAt) { $rabbitDue = $redisKilledAt + $RabbitKillDelaySeconds }
         if (-not $SkipRabbit -and -not $rabbitKilled -and $elapsed -ge $rabbitDue) {
-            Invoke-Kubectl -n $Namespace delete pod rabbitmq-server-0 --wait=false | Out-Null
+            Invoke-Kubectl -n $InfraNamespace delete pod rabbitmq-server-0 --wait=false | Out-Null
             $rabbitKilled = $true
             [void]$events.Add(('{0,5:N1} s  suppression de rabbitmq-server-0' -f $elapsed))
             Write-Host "  [$('{0:N1}' -f $elapsed) s] pod rabbitmq-server-0 supprimé" -ForegroundColor Yellow
@@ -173,9 +179,9 @@ while ((Get-Date) -lt $deadline) {
 $streamAfter = Get-StreamMessageCount
 
 Write-Step 'Attente du retour à la normale (Redis, RabbitMQ)'
-Invoke-Kubectl -n $Namespace rollout status statefulset/redis "--timeout=$($TimeoutSeconds)s" | Out-Host
-Invoke-Kubectl -n $Namespace rollout status statefulset/rabbitmq-server "--timeout=$($TimeoutSeconds)s" | Out-Host
-Invoke-Kubectl -n $Namespace wait --for=condition=AllReplicasReady rabbitmqcluster/rabbitmq "--timeout=$($TimeoutSeconds)s" | Out-Host
+Invoke-Kubectl -n $InfraNamespace rollout status statefulset/redis "--timeout=$($TimeoutSeconds)s" | Out-Host
+# Avec ou sans opérateur : StatefulSet déployé, cluster complet vu par chaque nœud.
+Wait-RabbitmqReady -TimeoutSeconds $TimeoutSeconds | Out-Null
 $masterAfter = Get-RedisMasterPod
 $restartsAfter = Get-PodRestarts
 

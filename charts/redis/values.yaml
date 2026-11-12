@@ -1,0 +1,59 @@
+# Valeurs par défaut du chart redis (dimensionnées pour un poste de développement).
+# Les noms des objets sont fixes (redis, redis-headless, redis-sentinel, redis-auth,
+# redis-scripts, cf. docs/contracts.md) : une seule installation par namespace
+# (orderflow-infra par défaut).
+
+# Domaine DNS du cluster. Les pods s'annoncent (réplication, Sentinel) sous leur FQDN
+# redis-N.redis-headless.<namespace du pod>.svc.<clusterDomain> : le namespace est lu dans
+# le pod (downward API), seul le domaine est à renseigner s'il n'est pas cluster.local.
+clusterDomain: cluster.local
+
+# Image (redis, sentinel, init) : [<registry>/]<repository>:<tag> (registry vide = Docker
+# Hub). Registre interne : copier l'image telle quelle puis renseigner registry et, si
+# besoin, imagePullSecrets (cf. docs/exploitation.md, « Environnement restreint »).
+image:
+  registry: ""
+  repository: redis
+  tag: 8.10.3-alpine
+  pullPolicy: IfNotPresent
+# Secrets (type kubernetes.io/dockerconfigjson) du namespace, ex. [{name: registry-pull}].
+imagePullSecrets: []
+# 1 master + (replicas - 1) réplicas, un sentinel par pod.
+replicas: 3
+# Nom du master surveillé par Sentinel (REDIS_MASTER_NAME côté applications).
+masterName: orderflow
+# maxmemory de redis.conf (politique noeviction) : rester bien sous resources.limits.memory.
+maxmemory: 128mb
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi   # maxmemory 128mb + marge pour fork AOF/RDB et buffers réplicas
+persistence:
+  # Vide = StorageClass par défaut du cluster (local-path sur k3s / Rancher Desktop).
+  storageClassName: ""
+  size: 1Gi
+sentinel:
+  # Nombre de sentinels qui doivent constater la panne du master (majorité de replicas).
+  quorum: 2
+  resources:
+    requests:
+      cpu: 20m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+# Init container qui génère redis.conf / sentinel.conf (files/init.sh).
+init:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+auth:
+  # Secret existant (clé "password") à utiliser. Vide : le chart crée Secret/redis-auth
+  # avec un mot de passe aléatoire au premier install, conservé ensuite (lookup).
+  # Les applications ne le lisent pas directement (autre namespace) : scripts/deploy-apps.ps1
+  # en recopie la valeur dans Secret/redis-credentials de leur namespace.
+  existingSecret: ""

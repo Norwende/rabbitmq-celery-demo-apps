@@ -1,0 +1,52 @@
+# Service client : mêmes nom et ports que celui de l'opérateur (AMQP, management, stream,
+# prometheus). Ne route que vers les nœuds prêts (port AMQP ouvert).
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "rabbitmq.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp
+      appProtocol: amqp
+    - name: management
+      port: 15672
+      targetPort: management
+      appProtocol: http
+    - name: stream
+      port: 5552
+      targetPort: stream
+      appProtocol: rabbitmq.com/stream
+    - name: prometheus
+      port: 15692
+      targetPort: prometheus
+      appProtocol: prometheus.io/metrics
+---
+# Service headless : identité DNS stable de chaque nœud
+# (rabbitmq-server-N.rabbitmq-nodes.<namespace>), base des noms de nœuds Erlang.
+# publishNotReadyAddresses : les nœuds doivent se résoudre AVANT d'être prêts (formation du
+# cluster, redémarrage d'un nœud qui attend ses pairs).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rabbitmq.headlessService" . }}
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "rabbitmq.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: epmd
+      port: 4369
+      targetPort: epmd
+    - name: cluster-rpc
+      port: 25672
+      targetPort: cluster-rpc

@@ -1,0 +1,13 @@
+# Au plus un nœud RabbitMQ volontairement indisponible : les quorum queues et le stream à
+# 3 réplicas gardent leur majorité.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "rabbitmq.selectorLabels" . | nindent 6 }}

@@ -1,11 +1,11 @@
 """Order creation (Celery chain by task name) and status reconstruction."""
 
 import json
-import logging
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import structlog
 from celery import chain, signature
 from celery.canvas import Signature
 from celery.result import AsyncResult, result_from_tuple
@@ -15,7 +15,7 @@ from redis.exceptions import RedisError
 from gateway.celery_app import app as celery_app
 from gateway.models import OrderRequest, OrderStatus, Step
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # The chain emitted for every order, in execution order (contract section 3).
 CHAIN_STEPS = ("payments.authorize", "inventory.reserve", "notifications.order_confirmed")
@@ -74,7 +74,7 @@ def submit_order(order: dict, redis: Redis, ttl_seconds: int) -> None:
         try:
             redis.delete(key)
         except RedisError as exc:
-            logger.warning("could not remove tracking key %s after a failed publish: %s", key, exc)
+            logger.warning("tracking_key_cleanup_failed", key=key, error_type=type(exc).__name__, error=str(exc))
         raise
 
 

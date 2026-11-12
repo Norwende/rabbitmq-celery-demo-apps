@@ -1,0 +1,12 @@
+# Scripts du StatefulSet Redis (sources : files/). Nom fixe : c'est l'annotation
+# checksum/scripts du pod template qui déclenche le rolling update quand un script change.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-scripts
+  labels:
+    {{- include "redis.labels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+data:
+  {{- include "redis.scripts" . | nindent 2 }}

@@ -1,0 +1,88 @@
+# Valeurs par défaut du chart rabbitmq-standalone (dimensionnées pour un poste de
+# développement). Variante SANS opérateur du chart rabbitmq : mêmes noms d'objets que ceux
+# créés par le RabbitMQ Cluster Operator (StatefulSet/rabbitmq-server, Services rabbitmq et
+# rabbitmq-nodes, Secret/rabbitmq-default-user), donc applications, scripts et documentation
+# inchangés. Une seule installation par namespace (orderflow-infra par défaut), et jamais en
+# même temps que le chart rabbitmq (mêmes noms).
+# L'utilisateur applicatif "orderflow" n'est pas créé ici : scripts/deploy-apps.ps1 le
+# provisionne (rabbitmqctl) et range ses identifiants dans le namespace des applications.
+
+# Image : [<registry>/]<repository>:<tag>. registry vide = Docker Hub (rabbitmq:4.3.7-management).
+# Registre interne : copier l'image telle quelle (cf. docs/exploitation.md, « Environnement
+# restreint ») puis renseigner registry (ex. registry.corp.example/mirror) et, si besoin,
+# imagePullSecrets.
+image:
+  registry: ""
+  repository: rabbitmq
+  tag: 4.3.7-management
+  pullPolicy: IfNotPresent
+# Secrets (type kubernetes.io/dockerconfigjson) du namespace, ex. [{name: registry-pull}].
+imagePullSecrets: []
+
+# Nombre de nœuds. La liste des pairs (classic_config) en est dérivée : la changer modifie
+# la configuration, donc relance les nœuds un par un (rolling update). Scale-down : cf.
+# docs/exploitation.md (forget_cluster_node), jamais par simple baisse de cette valeur.
+replicas: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 400Mi
+  limits:
+    # Pas de limite CPU (évite le throttling d'Erlang). Comme l'opérateur, le chart fixe
+    # total_memory_available_override_value à 80 % de cette limite (marge pour le runtime).
+    memory: 600Mi
+
+persistence:
+  # Vide = StorageClass par défaut du cluster (local-path sur k3s / Rancher Desktop).
+  storageClassName: ""
+  size: 1Gi
+
+# Temps laissé au preStop (attente que l'arrêt du nœud ne fasse perdre la majorité à aucune
+# quorum queue ni stream, puis drain). Utilisé aussi comme délai des commandes du preStop.
+terminationGracePeriodSeconds: 300
+
+# rabbitmq_management (UI, sonde de démarrage) et rabbitmq_prometheus (:15692) sont toujours
+# activés par le chart, comme par l'opérateur. Pas de plugin de peer discovery : classic_config
+# est intégré au serveur.
+additionalPlugins:
+  - rabbitmq_stream
+  - rabbitmq_stream_management
+
+# Mêmes réglages que le chart rabbitmq (90-userDefinedConfiguration.conf). default_queue_type
+# volontairement NON forcé : c'est le contrat qui impose x-queue-type=quorum.
+additionalConfig: |
+  # Partition réseau : la minorité se met en pause plutôt que de diverger.
+  cluster_partition_handling = pause_minority
+  # Watermark relatif à total_memory_available_override_value (80 % de limits.memory) :
+  # alarme mémoire vers ~290 Mi, bien sous la limite cgroup.
+  vm_memory_high_watermark.relative = 0.6
+  # Le PV local partage le disque de l'hôte : seuil absolu modeste.
+  disk_free_limit.absolute = 256MB
+
+auth:
+  # Secret existant (clés username et password) de l'administrateur. Vide : le chart crée
+  # Secret/rabbitmq-default-user (mêmes clés que celui de l'opérateur), identifiants
+  # aléatoires au premier install, conservés ensuite. L'administrateur est créé au PREMIER
+  # démarrage du cluster seulement (default_user/default_pass) : changer le Secret ensuite
+  # ne change pas le mot de passe dans RabbitMQ (rabbitmqctl change_password).
+  existingSecret: ""
+
+erlangCookie:
+  # Secret existant (clé .erlang.cookie, comme celui de l'opérateur). Vide : le chart crée
+  # Secret/rabbitmq-erlang-cookie (aléatoire au premier install, conservé ensuite). Tous
+  # les nœuds et les outils CLI doivent partager ce cookie.
+  existingSecret: ""
+
+# Init container (copie du cookie, attente du nœud d'amorçage par un nœud neuf).
+init:
+  # Un nœud neuf autre que rabbitmq-server-0 attend qu'un pair déjà démarré réponde avant de
+  # démarrer (évite la formation de deux clusters séparés, cf. docs/architecture.md). Au-delà,
+  # l'init container échoue et Kubernetes le relance.
+  formationTimeoutSeconds: 600
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi

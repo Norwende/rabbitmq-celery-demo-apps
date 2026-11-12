@@ -56,11 +56,18 @@
       "additionalProperties": { "type": "string" }
     },
     "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] },
+    "infraNamespace": {
+      "description": "Namespace des releases rabbitmq et redis (base des adresses par défaut).",
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "maxLength": 63
+    },
+    "clusterDomain": { "type": "string", "minLength": 1 },
     "rabbitmq": {
       "type": "object",
       "required": ["host", "port", "vhost", "secretName"],
       "properties": {
-        "host": { "type": "string", "minLength": 1 },
+        "host": { "description": "Vide : rabbitmq.<infraNamespace>.svc.<clusterDomain>.", "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "vhost": { "type": "string", "minLength": 1 },
         "secretName": { "type": "string", "minLength": 1 }
@@ -71,7 +78,11 @@
       "type": "object",
       "required": ["sentinels", "masterName", "secretName"],
       "properties": {
-        "sentinels": { "type": "string", "pattern": "^[^,:\\s]+:[0-9]+(,[^,:\\s]+:[0-9]+)*$" },
+        "sentinels": {
+          "description": "Vide : redis-sentinel.<infraNamespace>.svc.<clusterDomain>:26379.",
+          "type": "string",
+          "pattern": "^([^,:\\s]+:[0-9]+(,[^,:\\s]+:[0-9]+)*)?$"
+        },
         "masterName": { "type": "string", "minLength": 1 },
         "db": { "type": "integer", "minimum": 0 },
         "secretName": { "type": "string", "minLength": 1 }
@@ -84,6 +95,7 @@
       "properties": {
         "image": { "type": "string", "minLength": 1 },
         "replicas": { "type": "integer", "minimum": 0 },
+        "logFormat": { "type": "string", "enum": ["json", "console"] },
         "resources": { "$ref": "#/definitions/resources" },
         "service": {
           "type": "object",

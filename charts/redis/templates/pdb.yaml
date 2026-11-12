@@ -5,11 +5,11 @@ kind: PodDisruptionBudget
 metadata:
   name: redis
   labels:
-    {{- include "orderflow-infra.labels" . | nindent 4 }}
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.labels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: cache
 spec:
   maxUnavailable: 1
   selector:
     matchLabels:
-      {{- include "orderflow-infra.redis.selectorLabels" . | nindent 6 }}
+      {{- include "redis.selectorLabels" . | nindent 6 }}

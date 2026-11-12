@@ -1,4 +1,4 @@
-{{- $ctx := dict "root" $ "name" "gateway" "component" "api" "image" .Values.gateway.image }}
+{{- $ctx := dict "root" $ "name" "gateway" "component" "api" "image" .Values.gateway.image "redis" true }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,6 +30,9 @@ spec:
             {{- include "orderflow.envFrom" $ | nindent 12 }}
           env:
             {{- include "orderflow.secretEnv" (dict "root" $ "redis" true) | nindent 12 }}
+            # Propre au gateway (structlog) : json (une ligne JSON par événement) ou console.
+            - name: LOG_FORMAT
+              value: {{ .Values.gateway.logFormat | quote }}
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 10

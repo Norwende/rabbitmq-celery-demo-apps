@@ -17,6 +17,7 @@ class Settings:
     redis_password: str
     redis_db: int
     log_level: str
+    log_format: str
     order_ttl_seconds: int
 
     @classmethod
@@ -33,6 +34,7 @@ class Settings:
             redis_password=env("REDIS_PASSWORD", ""),
             redis_db=int(env("REDIS_DB", "0")),
             log_level=env("LOG_LEVEL", "INFO").upper(),
+            log_format=env("LOG_FORMAT", "json").lower(),
             order_ttl_seconds=int(env("ORDER_TTL_SECONDS", "86400")),
         )
 

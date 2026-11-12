@@ -1,0 +1,12 @@
+Redis Sentinel ({{ .Values.replicas }} pods, master "{{ .Values.masterName }}") installé dans le namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+État de Sentinel :
+  kubectl -n {{ .Release.Namespace }} exec redis-0 -c sentinel -- redis-cli --no-auth-warning -p 26379 SENTINEL get-master-addr-by-name {{ .Values.masterName }}
+
+Adresse Sentinel pour les applications d'un autre namespace :
+  redis-sentinel.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:26379
+  (Sentinel répond par le FQDN du master : redis-N.redis-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }})
+
+Mot de passe : Secret/{{ include "redis.secretName" . }} (clé "password"){{ if not .Values.auth.existingSecret }}, généré au premier install et conservé aux upgrades{{ end }}.
+Un Secret ne se référence pas d'un namespace à l'autre : ./scripts/deploy-apps.ps1 en recopie la valeur dans
+Secret/redis-credentials du namespace des applications (cf. NOTES du chart orderflow pour l'équivalent manuel).

@@ -1,6 +1,6 @@
 {{- /* Un Deployment subscriber-<clé> par entrée de .Values.subscribers (image unique). */}}
 {{- range $key, $sub := .Values.subscribers }}
-{{- $ctx := dict "root" $ "name" (printf "subscriber-%s" $key) "component" "subscriber" "image" "subscriber" }}
+{{- $ctx := dict "root" $ "name" (printf "subscriber-%s" $key) "component" "subscriber" "image" "subscriber" "redis" true }}
 ---
 apiVersion: apps/v1
 kind: Deployment

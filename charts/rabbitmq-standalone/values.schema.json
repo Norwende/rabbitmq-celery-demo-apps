@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "rabbitmq-standalone values",
+  "type": "object",
+  "required": ["image", "replicas", "persistence", "auth", "erlangCookie", "init"],
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "registry": { "type": "string" },
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Nombre de nœuds (3 recommandé : majorité des quorum queues avec un nœud perdu)."
+    },
+    "resources": { "$ref": "#/definitions/resources" },
+    "persistence": {
+      "type": "object",
+      "required": ["size"],
+      "properties": {
+        "storageClassName": { "type": "string" },
+        "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti)?$" }
+      },
+      "additionalProperties": false
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 },
+    "additionalPlugins": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_]+$" } },
+    "additionalConfig": { "type": "string" },
+    "auth": {
+      "type": "object",
+      "properties": { "existingSecret": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "erlangCookie": {
+      "type": "object",
+      "properties": { "existingSecret": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "init": {
+      "type": "object",
+      "properties": {
+        "formationTimeoutSeconds": { "type": "integer", "minimum": 30 },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

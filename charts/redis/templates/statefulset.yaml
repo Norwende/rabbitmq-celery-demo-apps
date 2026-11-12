@@ -1,16 +1,16 @@
 # Redis 1 master + N-1 réplicas avec un sidecar Sentinel par pod.
-# Le rôle de chaque pod est décidé au démarrage par l'init container (files/redis/init.sh) ;
+# Le rôle de chaque pod est décidé au démarrage par l'init container (files/init.sh) ;
 # ensuite c'est Sentinel qui pilote (failover, reconfiguration des réplicas).
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
   labels:
-    {{- include "orderflow-infra.labels" . | nindent 4 }}
-    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    {{- include "redis.labels" . | nindent 4 }}
+    {{- include "redis.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: cache
 spec:
-  replicas: {{ .Values.redis.replicas }}
+  replicas: {{ .Values.replicas }}
   serviceName: redis-headless
   # OrderedReady : au premier démarrage (ou après un arrêt complet) redis-0 est prêt
   # avant que redis-1/2 ne cherchent un master -> bootstrap déterministe, jamais deux
@@ -24,20 +24,24 @@ spec:
   minReadySeconds: 10
   selector:
     matchLabels:
-      {{- include "orderflow-infra.redis.selectorLabels" . | nindent 6 }}
+      {{- include "redis.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "orderflow-infra.redis.selectorLabels" . | nindent 8 }}
+        {{- include "redis.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: cache
         app.kubernetes.io/part-of: orderflow
       annotations:
         # Un script modifié => nouveau pod template => rolling update (avec preStop).
-        checksum/scripts: {{ include "orderflow-infra.redis.scripts" . | sha256sum }}
+        checksum/scripts: {{ include "redis.scripts" . | sha256sum }}
     spec:
       # Doit couvrir le preStop (attente réplicas sains 15 s + failover 40 s max).
       terminationGracePeriodSeconds: 75
       enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 999     # utilisateur "redis" de l'image officielle
@@ -54,25 +58,26 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 20 }}
+                    {{- include "redis.selectorLabels" . | nindent 20 }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              {{- include "orderflow-infra.redis.selectorLabels" . | nindent 14 }}
+              {{- include "redis.selectorLabels" . | nindent 14 }}
 
       initContainers:
         - name: config
-          image: {{ .Values.redis.image }}
+          image: {{ include "redis.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["sh", "/scripts/init.sh"]
           env:
-            {{- include "orderflow-infra.redis.scriptEnv" . | nindent 12 }}
+            {{- include "redis.scriptEnv" . | nindent 12 }}
           resources:
-            {{- toYaml .Values.redis.init.resources | nindent 12 }}
+            {{- toYaml .Values.init.resources | nindent 12 }}
           securityContext:
-            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+            {{- include "redis.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /config
@@ -81,14 +86,15 @@ spec:
 
       containers:
         - name: redis
-          image: {{ .Values.redis.image }}
+          image: {{ include "redis.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           # On court-circuite l'entrypoint de l'image : il chargerait les modules Redis 8
           # (search, json, timeseries, bloom), inutiles ici et coûteux en mémoire.
           command: ["redis-server", "/config/redis.conf"]
           env:
-            {{- include "orderflow-infra.redis.cliAuthEnv" . | nindent 12 }}
+            {{- include "redis.cliAuthEnv" . | nindent 12 }}
             # utilisées par le preStop
-            {{- include "orderflow-infra.redis.scriptEnv" . | nindent 12 }}
+            {{- include "redis.scriptEnv" . | nindent 12 }}
           ports:
             - name: redis
               containerPort: 6379
@@ -116,9 +122,9 @@ spec:
               exec:
                 command: ["sh", "/scripts/prestop.sh"]
           resources:
-            {{- toYaml .Values.redis.resources | nindent 12 }}
+            {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
-            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+            {{- include "redis.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -128,10 +134,11 @@ spec:
               mountPath: /scripts
 
         - name: sentinel
-          image: {{ .Values.redis.image }}
+          image: {{ include "redis.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["redis-sentinel", "/config/sentinel.conf"]
           env:
-            {{- include "orderflow-infra.redis.cliAuthEnv" . | nindent 12 }}
+            {{- include "redis.cliAuthEnv" . | nindent 12 }}
           ports:
             - name: sentinel
               containerPort: 26379
@@ -148,9 +155,9 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 5
           resources:
-            {{- toYaml .Values.redis.sentinel.resources | nindent 12 }}
+            {{- toYaml .Values.sentinel.resources | nindent 12 }}
           securityContext:
-            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+            {{- include "redis.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /config
@@ -170,12 +177,12 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "orderflow-infra.redis.selectorLabels" . | nindent 10 }}
+          {{- include "redis.selectorLabels" . | nindent 10 }}
       spec:
         accessModes: ["ReadWriteOnce"]
-        {{- with .Values.redis.persistence.storageClassName }}
+        {{- with .Values.persistence.storageClassName }}
         storageClassName: {{ . }}
         {{- end }}
         resources:
           requests:
-            storage: {{ .Values.redis.persistence.size }}
+            storage: {{ .Values.persistence.size }}

@@ -1,9 +1,9 @@
 """FastAPI application (contract section 5)."""
 
-import logging
 from functools import lru_cache
 from typing import Annotated
 
+import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from kombu.exceptions import OperationalError as BrokerUnavailable
@@ -14,13 +14,15 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from gateway.celery_app import app as celery_app
 from gateway.config import settings
+from gateway.logs import RequestContextMiddleware, bind_request_context
 from gateway.models import OrderAccepted, OrderRequest, OrderStatus
 from gateway.orders import build_order, load_status, submit_order, utcnow
 from gateway.redis_client import connect_redis
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 app = FastAPI(title="OrderFlow gateway", version="0.1.0")
+app.add_middleware(RequestContextMiddleware)
 
 RETRY_AFTER_SECONDS = 5
 
@@ -29,8 +31,10 @@ def unavailable(dependency: str):
     """Exception handler: an infrastructure dependency is still down after the client retries."""
 
     def handler(request: Request, exc: Exception) -> JSONResponse:
-        logger.warning("%s %s -> 503: %s unavailable (%s: %s)",
-                       request.method, request.url.path, dependency, type(exc).__name__, exc)
+        # Expected degradation: one warning line, no traceback (request fields come from
+        # the context bound by RequestContextMiddleware).
+        logger.warning("dependency_unavailable", dependency=dependency, status=503,
+                       error_type=type(exc).__name__, error=str(exc))
         return JSONResponse(
             {"detail": f"{dependency} temporarily unavailable, retry later"},
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -58,17 +62,17 @@ RedisDep = Annotated[Redis, Depends(get_redis)]
 @app.post("/orders", status_code=status.HTTP_202_ACCEPTED, response_model=OrderAccepted)
 def create_order(body: OrderRequest, request: Request, redis: RedisDep) -> OrderAccepted:
     order = build_order(body, utcnow())
+    bind_request_context(request, order_id=order["order_id"])
     submit_order(order, redis, settings.order_ttl_seconds)
-    logger.info(
-        "order accepted order_id=%s customer_id=%s total_amount=%s %s",
-        order["order_id"], order["customer_id"], order["total_amount"], order["currency"],
-    )
+    logger.info("order_accepted", customer_id=order["customer_id"],
+                total_amount=order["total_amount"], currency=order["currency"])
     status_url = str(request.url_for("get_order", order_id=order["order_id"]))
     return OrderAccepted(order_id=order["order_id"], status_url=status_url)
 
 
 @app.get("/orders/{order_id}", response_model=OrderStatus)
-def get_order(order_id: str, redis: RedisDep) -> OrderStatus:
+def get_order(order_id: str, request: Request, redis: RedisDep) -> OrderStatus:
+    bind_request_context(request, order_id=order_id)
     order_status = load_status(order_id, redis)
     if order_status is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="order not found")

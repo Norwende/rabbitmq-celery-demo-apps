@@ -3,37 +3,43 @@ Noms fixes (docs/contracts.md) : pas de préfixe .Release.Name, une installation
 namespace. Seuls les labels portent le nom de la release (app.kubernetes.io/instance).
 */}}
 
-{{- define "orderflow-infra.chart" -}}
+{{- define "redis.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* Labels communs (metadata.labels uniquement, jamais dans un sélecteur ni un pod template :
 un changement de version du chart ne doit relancer aucun pod). */}}
-{{- define "orderflow-infra.labels" -}}
-helm.sh/chart: {{ include "orderflow-infra.chart" . }}
+{{- define "redis.labels" -}}
+helm.sh/chart: {{ include "redis.chart" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: orderflow
 {{- end }}
 
 {{/* Sélecteur des pods Redis (immuable sur le StatefulSet). */}}
-{{- define "orderflow-infra.redis.selectorLabels" -}}
+{{- define "redis.selectorLabels" -}}
 app.kubernetes.io/name: redis
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{- define "redis.image" -}}
+{{- with .Values.image.registry }}{{ trimSuffix "/" . }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}
+{{- end }}
+
 {{/* Secret qui porte le mot de passe Redis (clé "password"). */}}
-{{- define "orderflow-infra.redis.secretName" -}}
-{{- .Values.redis.auth.existingSecret | default "redis-auth" }}
+{{- define "redis.secretName" -}}
+{{- .Values.auth.existingSecret | default "redis-auth" }}
 {{- end }}
 
-{{/* Contenu des scripts Redis (files/redis/*.sh) : données de la ConfigMap et base de son
-checksum, posé en annotation du pod template (un script modifié => rolling update). */}}
-{{- define "orderflow-infra.redis.scripts" -}}
-{{ (.Files.Glob "files/redis/*.sh").AsConfig }}
+{{/* Contenu des scripts (files/*.sh) : données de la ConfigMap et base de son checksum,
+posé en annotation du pod template (un script modifié => rolling update). */}}
+{{- define "redis.scripts" -}}
+{{ (.Files.Glob "files/*.sh").AsConfig }}
 {{- end }}
 
-{{/* Variables lues par les scripts (init container et preStop du conteneur redis). */}}
-{{- define "orderflow-infra.redis.scriptEnv" -}}
+{{/* Variables lues par les scripts (init container et preStop du conteneur redis).
+POD_NAMESPACE vient de la downward API : les FQDN annoncés suivent le namespace réel du
+pod, rien n'est écrit en dur. */}}
+{{- define "redis.scriptEnv" -}}
 - name: POD_NAME
   valueFrom:
     fieldRef:
@@ -45,16 +51,16 @@ checksum, posé en annotation du pod template (un script modifié => rolling upd
 - name: REDIS_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ include "orderflow-infra.redis.secretName" . }}
+      name: {{ include "redis.secretName" . }}
       key: password
 - name: MASTER_NAME
-  value: {{ .Values.redis.masterName | quote }}
+  value: {{ .Values.masterName | quote }}
 - name: REPLICAS
-  value: {{ .Values.redis.replicas | quote }}
+  value: {{ .Values.replicas | quote }}
 - name: SENTINEL_QUORUM
-  value: {{ .Values.redis.sentinel.quorum | quote }}
+  value: {{ .Values.sentinel.quorum | quote }}
 - name: REDIS_MAXMEMORY
-  value: {{ .Values.redis.maxmemory | quote }}
+  value: {{ .Values.maxmemory | quote }}
 - name: HEADLESS_SERVICE
   value: redis-headless
 - name: CLUSTER_DOMAIN
@@ -62,15 +68,15 @@ checksum, posé en annotation du pod template (un script modifié => rolling upd
 {{- end }}
 
 {{/* REDISCLI_AUTH : lu par redis-cli (probes, kubectl exec), mot de passe jamais en argument. */}}
-{{- define "orderflow-infra.redis.cliAuthEnv" -}}
+{{- define "redis.cliAuthEnv" -}}
 - name: REDISCLI_AUTH
   valueFrom:
     secretKeyRef:
-      name: {{ include "orderflow-infra.redis.secretName" . }}
+      name: {{ include "redis.secretName" . }}
       key: password
 {{- end }}
 
-{{- define "orderflow-infra.redis.containerSecurityContext" -}}
+{{- define "redis.containerSecurityContext" -}}
 allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
 capabilities:

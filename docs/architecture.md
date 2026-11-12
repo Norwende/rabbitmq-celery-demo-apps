@@ -17,9 +17,14 @@ les procédures dans [exploitation.md](exploitation.md).
 | `subscriber-analytics` | `Deployment` (stratégie `Recreate`) | 1 | Lit le stream depuis `first`, agrège compteurs et chiffre d'affaires dans Redis, checkpoint. |
 | `subscriber-audit` | idem | 1 | Lit depuis `first`, écrit chaque événement en JSON brut sur stdout, checkpoint. |
 | `subscriber-live` | idem | 1 | Lit depuis `next` (temps réel seulement), pas de checkpoint. |
-| RabbitMQ | `RabbitmqCluster/rabbitmq` → `StatefulSet/rabbitmq-server` | 3 | Broker des tâches (quorum queues) et du stream. Plugins management, prometheus et peer discovery (activés par l'opérateur), stream et stream management (ajoutés). |
+| RabbitMQ | `RabbitmqCluster/rabbitmq` → `StatefulSet/rabbitmq-server` (variante par défaut) ; ou directement `StatefulSet/rabbitmq-server` (variante sans opérateur, ADR-19) | 3 | Broker des tâches (quorum queues) et du stream. Plugins management, prometheus et peer discovery k8s (activés par l'opérateur ; sans opérateur : `classic_config`, intégré), stream et stream management (ajoutés). |
 | Redis | `StatefulSet/redis` (conteneurs `redis` + `sentinel`) | 3 | Result backend Celery, clés de suivi des commandes, agrégats, checkpoints. 1 master, 2 réplicas, 3 sentinels (quorum 2). |
-| RabbitMQ Cluster Operator | `Deployment/rabbitmq-cluster-operator` (ns `rabbitmq-system`) | 1 | Gère le cycle de vie du cluster RabbitMQ. Requiert cert-manager. |
+| RabbitMQ Cluster Operator | `Deployment/rabbitmq-cluster-operator` (ns `rabbitmq-system`) | 1 | Gère le cycle de vie du cluster RabbitMQ. Requiert cert-manager. Absent de la variante sans opérateur (ADR-19). |
+
+Namespaces : les huit Deployments applicatifs dans `orderflow` (release `orderflow`), RabbitMQ
+et Redis dans `orderflow-infra` (releases `rabbitmq` et `redis`), l'opérateur dans
+`rabbitmq-system` (ADR-16). Les applications joignent l'infrastructure par des noms DNS
+complets et s'authentifient avec des Secrets de leur propre namespace (ADR-17).
 
 Les trois workers sont construits sur le même gabarit (`celery_app.py`, `config.py`,
 `probes.py`, `tasks.py`), concurrence `WORKER_CONCURRENCY=2` (pool prefork par défaut de Celery).
@@ -43,21 +48,22 @@ Objets RabbitMQ observés sur le cluster en fonctionnement :
   pairs, un Secret d'identifiants, et surtout des arrêts de pods qui ne cassent pas les quorum
   queues (attendre qu'un nœud ne soit plus critique avant de l'arrêter).
 - **Décision.** `RabbitmqCluster` du Cluster Operator v2.23.2, rendu par le chart
-  `orderflow-infra` (`charts/orderflow-infra/templates/rabbitmq-cluster.yaml`) ; l'opérateur
+  `rabbitmq` (`charts/rabbitmq/templates/rabbitmqcluster.yaml`) ; l'opérateur
   lui-même reste installé par son manifeste de release épinglé
   (`k8s/operators/rabbitmq-cluster-operator`, cf. ADR-16). Pas de chart RabbitMQ tiers
   (Bitnami) : il réimplémenterait à la main ce que l'opérateur fait mieux.
 - **Conséquences.**
   - Une quarantaine de lignes déclaratives : l'opérateur crée `StatefulSet/rabbitmq-server`,
     `Service/rabbitmq` (5672, 15672, 5552, 15692), `Service/rabbitmq-nodes` et
-    `Secret/rabbitmq-default-user`, active `rabbitmq_peer_discovery_k8s`, et pose un `preStop`
-    qui attend la resynchronisation des quorum queues.
+    `Secret/rabbitmq-default-user` (administrateur, réservé à l'exploitation : ADR-17), active
+    `rabbitmq_peer_discovery_k8s`, et pose un `preStop` qui attend la resynchronisation des
+    quorum queues.
   - Dépendance à **cert-manager** (webhooks d'admission de l'opérateur) et à des CRD installées
     côté cluster (`kubectl apply --server-side`, le CRD dépassant la taille de l'annotation
     `last-applied-configuration`).
   - `terminationGracePeriodSeconds: 300` au lieu du défaut de l'opérateur (7 jours) : sur un seul
     nœud, attendre indéfiniment une resynchro bloquerait un rollout raté.
-  - Le PDB n'est pas fourni par l'opérateur : `charts/orderflow-infra/templates/rabbitmq-pdb.yaml`
+  - Le PDB n'est pas fourni par l'opérateur : `charts/rabbitmq/templates/pdb.yaml`
     (`maxUnavailable: 1`).
   - Configuration ajoutée dans `additionalConfig` : `cluster_partition_handling = pause_minority`
     (la minorité se met en pause au lieu de diverger), `vm_memory_high_watermark.relative = 0.6`,
@@ -71,6 +77,9 @@ Objets RabbitMQ observés sur le cluster en fonctionnement :
     `rabbitmq_peer_discovery_k8s` (ConfigMap générée `rabbitmq-plugins-conf`).
   - Pas de limite CPU (évite le throttling de la VM Erlang) ; la limite mémoire (600Mi) sert à
     l'opérateur pour calculer la mémoire disponible.
+  - Là où l'opérateur ne peut pas être installé (pas de droits cluster-admin, pas d'accès à
+    Internet), le chart `rabbitmq-standalone` fournit le même cluster sans opérateur
+    (ADR-19) ; c'est une alternative, pas le défaut.
 
 ### ADR-02 — Quorum queues pour les tâches
 
@@ -78,8 +87,8 @@ Objets RabbitMQ observés sur le cluster en fonctionnement :
   perdue. Les files classiques mirrorées n'existent plus en RabbitMQ 4.
 - **Décision.** Toutes les files de tâches sont des quorum queues (réplication Raft sur les 3
   nœuds), déclarées explicitement par les applications. `default_queue_type` n'est **pas** forcé
-  côté broker (cf. commentaire de `rabbitmq.additionalConfig` dans
-  `charts/orderflow-infra/values.yaml`) : c'est le contrat qui l'impose.
+  côté broker (cf. commentaire de `additionalConfig` dans
+  `charts/rabbitmq/values.yaml`) : c'est le contrat qui l'impose.
 - **Conséquences.**
   - Un message confirmé (publisher confirm) est écrit sur une majorité de nœuds : la perte d'un
     nœud ne perd ni message ni disponibilité.
@@ -202,8 +211,8 @@ Objets RabbitMQ observés sur le cluster en fonctionnement :
 - **Contexte.** Il faut un Redis hautement disponible et compréhensible ligne à ligne. Les charts
   existants couvrent beaucoup de cas mais masquent les mécanismes qu'on veut montrer.
 - **Décision.** `StatefulSet/redis` de 3 pods, chacun avec un conteneur `redis` et un sidecar
-  `sentinel` (chart `orderflow-infra`), plus trois scripts shell, vrais fichiers du chart
-  (`charts/orderflow-infra/files/redis/*.sh`), montés depuis `ConfigMap/redis-scripts` ;
+  `sentinel` (chart `redis`), plus trois scripts shell, vrais fichiers du chart
+  (`charts/redis/files/*.sh`), montés depuis `ConfigMap/redis-scripts` ;
   l'annotation `checksum/scripts` du pod template déclenche un rolling update quand un script
   change (ADR-16).
 - **Points de conception.**
@@ -217,7 +226,12 @@ Objets RabbitMQ observés sur le cluster en fonctionnement :
   - **Noms DNS plutôt qu'IP.** `replica-announce-ip`, `sentinel announce-ip`,
     `resolve-hostnames yes`, `announce-hostnames yes` avec les FQDN du service headless : l'IP
     d'un pod change à chaque redémarrage, son nom non. Le service headless a
-    `publishNotReadyAddresses: true` pour que les pods se résolvent avant d'être Ready.
+    `publishNotReadyAddresses: true` pour que les pods se résolvent avant d'être Ready. Le
+    FQDN (`redis-N.redis-headless.<namespace>.svc.<domaine>`) est construit par les scripts à
+    partir de `POD_NAMESPACE` (downward API) et de la value `clusterDomain` : rien n'est écrit
+    en dur, le chart s'installe dans n'importe quel namespace, et ces noms complets se
+    résolvent depuis le namespace des applications (vérifié : Sentinel répond
+    `redis-0.redis-headless.orderflow-infra.svc.cluster.local`, joignable depuis `orderflow`).
   - **Failover propre au `preStop` (`prestop.sh`).** Si le pod arrêté est master : attendre (15 s
     max) que ses réplicas soient vus sains par un sentinel pair, geler les écritures
     (`CLIENT PAUSE 60000 WRITE`), déclencher `SENTINEL FAILOVER` via le sentinel d'un autre pod
@@ -289,9 +303,12 @@ Tous les conteneurs applicatifs : `runAsNonRoot` (UID/GID 10001, créés dans l'
 inscriptible (`emptyDir`, 16Mi). Redis tourne en UID 999 avec le même durcissement ; ses
 configurations sont générées dans un `emptyDir` car Redis et Sentinel les réécrivent.
 Images multi-stage : `uv sync --locked --no-dev` dans l'étape de build, seule la `.venv` est
-copiée dans l'image finale `python:3.13-slim`. Mots de passe : `Secret/rabbitmq-default-user`
-(généré par l'opérateur) et `Secret/redis-auth` (généré aléatoirement par le chart
-`orderflow-infra` au premier install puis conservé, jamais versionné ; cf. ADR-16).
+copiée dans l'image finale `python:3.13-slim`. Mots de passe, tous aléatoires et jamais
+versionnés : `Secret/rabbitmq-default-user` (administrateur, généré par l'opérateur — ou par
+le chart `rabbitmq-standalone`, avec `Secret/rabbitmq-erlang-cookie`, ADR-19 —, réservé à
+l'exploitation), `Secret/redis-auth` (généré par le chart `redis` au premier install puis
+conservé ; ADR-16) et, dans le namespace des applications, `Secret/rabbitmq-credentials`
+(utilisateur `orderflow` sans droit d'administration) et `Secret/redis-credentials` (ADR-17).
 
 ### ADR-13 — Ressources
 
@@ -384,36 +401,67 @@ cluster multi-nœuds, passer en *required* pour que la perte d'un nœud n'emport
   tâches rares (quotidiennes) dont on veut l'historique dans l'API Kubernetes, le CronJob
   serait un choix défendable.
 
-### ADR-16 — Déploiement par deux charts Helm, opérateur RabbitMQ à part
+### ADR-16 — Trois charts Helm, infrastructure et applications dans deux namespaces
 
 - **Contexte.** Les manifestes Kustomize figeaient des choix d'environnement
   (`storageClassName: local-path`, images `orderflow/*:dev`, tailles, réplicas) et
   répartissaient la logique de déploiement entre YAML et scripts (Secret Redis créé par un
   script, `rollout restart` systématique). Il faut un déploiement paramétrable, versionné et
   réversible, sans perdre aucun réglage fin (probes, preStop, stratégies, securityContext).
-- **Décision.** Deux charts locaux, deux releases dans le namespace `orderflow`, installées
-  dans cet ordre :
+  Une première version regroupait RabbitMQ et Redis dans un seul chart `orderflow-infra`,
+  installé avec les applications dans un namespace unique : mettre à jour Redis passait par
+  la même release que le broker, et rien ne séparait le code applicatif de l'infrastructure
+  stateful (droits, quotas, réseau).
+- **Décision.** Trois charts locaux, trois releases, deux namespaces :
 
-  | Release / chart | Contenu | Cycle de vie |
-  |---|---|---|
-  | `orderflow-infra` (`charts/orderflow-infra`) | `RabbitmqCluster` + PDB, StatefulSet Redis Sentinel + `ConfigMap/redis-scripts`, Services, PDB, `Secret/redis-auth` | rare, prudent : données persistantes, rolling updates lents (preStop, resynchronisation) |
-  | `orderflow` (`charts/orderflow`) | `ConfigMap/orderflow-config`, gateway + Service, 3 workers, scheduler, 3 subscribers, test `helm test` | fréquent : chaque build d'image ou changement de configuration |
+  | Release / chart | Namespace | Contenu | Cycle de vie |
+  |---|---|---|---|
+  | `rabbitmq` (`charts/rabbitmq`) | `orderflow-infra` | `RabbitmqCluster` + PDB | rare, prudent : données persistantes, l'opérateur redémarre les nœuds un par un en attendant la resynchronisation des quorum queues ; ou `charts/rabbitmq-standalone` (StatefulSet, Services, ConfigMap, Secrets, PDB, sans opérateur : ADR-19) |
+  | `redis` (`charts/redis`) | `orderflow-infra` | StatefulSet Redis Sentinel + `ConfigMap/redis-scripts`, Services, PDB, `Secret/redis-auth` | rare, prudent : rolling update avec failover au `preStop` |
+  | `orderflow` (`charts/orderflow`) | `orderflow` | `ConfigMap/orderflow-config`, gateway + Service, 3 workers, scheduler, 3 subscribers, test `helm test` | fréquent : chaque build d'image ou changement de configuration |
 
-  - **Deux charts plutôt qu'un.** Les deux couches n'évoluent pas au même rythme : un
-    déploiement applicatif (plusieurs fois par jour) ne doit jamais risquer un rollout de
-    Redis ou RabbitMQ, et un `helm rollback orderflow` ne doit pas ramener l'infrastructure
-    en arrière. Deux releases = deux historiques et deux rollbacks indépendants.
+  - **Un chart par composant d'infrastructure.** RabbitMQ et Redis n'ont ni le même mécanisme
+    de mise à jour (opérateur contre StatefulSet écrit à la main), ni les mêmes risques, ni
+    forcément le même calendrier : un réglage Redis ne doit pas créer de révision du broker,
+    et un `helm rollback redis` ne doit pas ramener RabbitMQ en arrière. Chaque chart est
+    autonome (son `Chart.yaml`, ses values, son schéma, ses helpers, ses NOTES) et
+    s'installe, se met à jour et se désinstalle seul (`deploy-infra.ps1 -Only rabbitmq|redis`).
+    Vérifié : un `helm upgrade` sans changement de l'un ou de l'autre ne redémarre aucun pod.
+    Leurs values sont à plat (`persistence.size`, pas `redis.persistence.size`) : un chart =
+    un composant.
+  - **Un chart pour les applications.** Un déploiement applicatif (plusieurs fois par jour)
+    ne doit jamais risquer un rollout de Redis ou de RabbitMQ, et un `helm rollback orderflow`
+    ne touche pas l'infrastructure : trois releases = trois historiques et trois rollbacks
+    indépendants.
+  - **Deux namespaces : `orderflow-infra` et `orderflow`.** Ce que la séparation apporte :
+    - **RBAC** : on peut donner aux développeurs (ou à la CI) les droits d'écriture sur
+      `orderflow` sans leur ouvrir `orderflow-infra` (StatefulSets, PVC, `Secret/redis-auth`,
+      administrateur RabbitMQ) ; un `kubectl delete` ou un `helm uninstall` applicatif ne
+      peut pas emporter les données ;
+    - **quotas** : `ResourceQuota` / `LimitRange` par namespace, pour qu'un emballement des
+      workers n'affame pas le broker (non posés ici, cf. limites) ;
+    - **rayon d'action** : supprimer ou recréer le namespace applicatif
+      (`destroy.ps1 -KeepInfra`) laisse files, stream et données Redis intacts ;
+    - **frontière réseau** : une `NetworkPolicy` dans `orderflow-infra` peut n'admettre que
+      le trafic venant du namespace `orderflow` (sélecteur `kubernetes.io/metadata.name`) sur
+      5672 et 26379/6379 (non posées ici, cf. limites).
+
+    Ce qu'elle coûte : les noms DNS courts ne suffisent plus (FQDN
+    `rabbitmq.orderflow-infra.svc.cluster.local`, dérivés de la value `infraNamespace` du
+    chart `orderflow`), et surtout **un Secret ne se référence pas d'un namespace à
+    l'autre** : les identifiants doivent exister dans le namespace des applications, ce qui
+    demande un mécanisme de provisionnement et de resynchronisation (ADR-17).
   - **Opérateur hors chart.** Il n'existe pas de chart Helm officiel du RabbitMQ Cluster
     Operator (le chart Bitnami est exclu) ; ses CRD sont un objet de cluster que Helm gère mal
     (jamais mis à jour ni supprimés par `helm upgrade`/`uninstall`). Il reste installé par le
     manifeste upstream épinglé (`k8s/operators/`, `kubectl apply --server-side`). Le chart
-    `orderflow-infra` vérifie sa présence : face à un vrai cluster sans le CRD
+    `rabbitmq` vérifie sa présence : face à un vrai cluster sans le CRD
     `rabbitmq.com/v1beta1`, `helm install` échoue avec un message explicite. La vérification
     ne s'applique qu'en ligne (une `lookup` du namespace `kube-system` répond) : `helm lint`,
     `helm template` et `--dry-run` client fonctionnent sans cluster.
   - **Noms fixes.** Les objets gardent exactement les noms du contrat (`rabbitmq`, `redis`,
     `redis-sentinel`, `redis-auth`, `orderflow-config`, `gateway`…, cf.
-    [contracts.md §2](contracts.md#2-infrastructure-namespace-orderflow)), sans préfixe
+    [contracts.md §2](contracts.md#2-infrastructure-et-namespaces)), sans préfixe
     `<release>-` : les applications, la documentation et les scripts les référencent en dur.
     Conséquence assumée : **une seule installation par namespace**. Les labels standard
     (`app.kubernetes.io/name|instance|component|part-of|managed-by`, `helm.sh/chart`) viennent
@@ -424,12 +472,14 @@ cluster multi-nœuds, passer en *required* pour que la perte d'un nœud n'emport
     `randAlphaNum 32` ; à chaque upgrade, `lookup` relit `Secret/redis-auth` et réutilise sa
     valeur (une rotation casserait Redis/Sentinel, configurés au démarrage des pods). Le Secret
     porte `helm.sh/resource-policy: keep` (il survit à `helm uninstall` et une réinstallation le
-    reprend) ; `redis.auth.existingSecret` permet de fournir son propre Secret.
-  - **Annotations de checksum.** `checksum/scripts` (contenu de `files/redis/*.sh`) sur le
-    StatefulSet Redis et `checksum/config` (données de `orderflow-config`) sur tous les
-    Deployments : modifier un script ou une valeur de configuration relance exactement les pods
-    concernés, avec leur stratégie habituelle (rolling update Redis avec failover au `preStop`,
-    `Recreate` du scheduler et des subscribers). Un `helm upgrade` sans changement ne relance rien.
+    reprend) ; `auth.existingSecret` permet de fournir son propre Secret.
+  - **Annotations de checksum.** `checksum/scripts` (contenu de `files/*.sh`) sur le
+    StatefulSet Redis, `checksum/config` (données de `orderflow-config`) et
+    `checksum/credentials` (données des Secrets d'identifiants, ADR-17) sur les Deployments :
+    modifier un script, une valeur de configuration ou un mot de passe relance exactement les
+    pods concernés, avec leur stratégie habituelle (rolling update Redis avec failover au
+    `preStop`, `Recreate` du scheduler et des subscribers). Un `helm upgrade` sans changement
+    ne relance rien.
   - **Tag `dev` mutable.** Reconstruire `orderflow/gateway:dev` ne change pas le pod template,
     donc rien ne bouge. `deploy-apps.ps1` calcule une empreinte du **contenu** de chaque image
     locale (sha256 des couches et de la configuration, via `docker image inspect`) et la passe
@@ -442,8 +492,8 @@ cluster multi-nœuds, passer en *required* pour que la perte d'un nœud n'emport
     relancerait tout à chaque déploiement). Avec des tags immuables (`image.tag`), l'annotation
     est inutile.
   - **StorageClass.** `storageClassName` vide par défaut = classe par défaut du cluster
-    (`local-path` sur k3s) ; surcharge par `rabbitmq.persistence.storageClassName` et
-    `redis.persistence.storageClassName`.
+    (`local-path` sur k3s) ; surcharge par la value `persistence.storageClassName` de chaque
+    chart d'infrastructure.
 - **Conséquences.**
   - Paramétrage par *values* (images et registry, réplicas, ressources, stockage, planning du
     digest, niveau de log, abonnés) validé par `values.schema.json` (par exemple
@@ -455,22 +505,258 @@ cluster multi-nœuds, passer en *required* pour que la perte d'un nœud n'emport
     un vrai retour arrière applicatif suppose des tags immuables.
   - `helm test orderflow` vérifie `GET /readyz` depuis le cluster (pod éphémère, image du
     gateway).
+  - Les scripts portent les deux namespaces de bout en bout (`-Namespace`, défaut
+    `orderflow` ; `-InfraNamespace`, défaut `orderflow-infra`) : `deploy-apps.ps1` transmet
+    `infraNamespace` au chart, `chaos.ps1` supprime les pods Redis/RabbitMQ dans le namespace
+    d'infrastructure et lit les journaux applicatifs dans l'autre.
+  - Mesuré après la séparation : failover Redis vu des applications inchangé (POST le plus
+    lent 2,0 à 2,2 s sur quatre exécutions de `chaos.ps1`, une valeur isolée à 7,7 s non
+    reproduite ; cf. [exploitation.md](exploitation.md#test-de-chaos)).
+
+### ADR-17 — Identifiants des applications, utilisateur RabbitMQ dédié et Secrets provisionnés par script
+
+- **Contexte.** Avec un seul namespace, les applications lisaient directement
+  `Secret/rabbitmq-default-user` (l'**administrateur** créé par l'opérateur : tag
+  `administrator`, tous les droits, accès à l'UI et à l'API HTTP) et `Secret/redis-auth`. Dans
+  un autre namespace, c'est impossible : `secretKeyRef` ne vise que le namespace du pod. Il
+  faut donc des Secrets dans le namespace `orderflow`, et c'est l'occasion de ne plus confier
+  l'administrateur du broker au code applicatif.
+- **Décision.**
+  - **Deux Secrets dans le namespace des applications**, de noms configurables (values
+    `rabbitmq.secretName`, défaut `rabbitmq-credentials`, clés `username` / `password` ;
+    `redis.secretName`, défaut `redis-credentials`, clé `password`), provisionnés par
+    `scripts/deploy-apps.ps1` **avant** le `helm upgrade`.
+  - **RabbitMQ : utilisateur dédié `orderflow`**, créé par `rabbitmqctl` dans un pod du cluster,
+    sans aucun tag (ni `administrator` ni `management`), permissions `configure` / `write` /
+    `read` `.*` sur le vhost `/`. Mot de passe aléatoire (32 caractères alphanumériques,
+    générateur cryptographique) généré **une seule fois** : si le Secret existe déjà, son mot de
+    passe est réutilisé, et le script vérifie seulement (`rabbitmqctl authenticate_user`) que
+    l'utilisateur existe avec ce mot de passe ; il ne réécrit ni utilisateur, ni tag, ni
+    permission déjà conformes. Le mot de passe n'est jamais affiché ni passé en argument : il va
+    à `rabbitmqctl` par l'entrée standard de `kubectl exec` (absent de la ligne de commande du
+    poste, de la requête exec envoyée à l'API server et des arguments des processus du pod), et
+    le Secret est écrit par `kubectl apply --server-side -f -` (manifeste sur l'entrée
+    standard). L'utilisateur est créé avant le Secret : un pod ne reçoit jamais l'identifiant
+    d'un utilisateur inexistant.
+  - **Redis : copie** de la clé `password` de `orderflow-infra/redis-auth` (ou du Secret
+    désigné par `auth.existingSecret`, lu sur le StatefulSet) vers `orderflow/redis-credentials`,
+    resynchronisée à chaque exécution. Redis n'a qu'un mot de passe (pas d'utilisateur
+    applicatif distinct : ACL Redis non utilisées, cf. limites).
+  - **Écritures idempotentes.** Server-side apply : un contenu identique ne modifie pas le
+    Secret (`resourceVersion` inchangé). Vérifié : une seconde exécution de `deploy.ps1` ne
+    recrée aucun pod, ne change aucun `resourceVersion` ni l'empreinte du hash de mot de passe
+    de l'utilisateur `orderflow` dans RabbitMQ.
+  - **Rotation = relance des pods concernés.** Annotation `checksum/credentials` (sha256 des
+    données des Secrets utilisés par le pod : RabbitMQ seul pour le scheduler, RabbitMQ et Redis
+    pour les autres), calculée **dans le chart par `lookup`** plutôt que transmise par le
+    script : elle suit le Secret réel quel que soit l'outil qui l'a modifié (script, `kubectl`,
+    rotation manuelle) dès le `helm upgrade` suivant, et rien de dérivé du mot de passe ne passe
+    par la ligne de commande ni ne s'inscrit dans les values de la release (seule une
+    empreinte sha256 figure sur les pods). Vérifié : rotation du mot de passe RabbitMQ → les 8
+    Deployments relancés ; rotation du mot de passe Redis → les 7 Deployments qui l'utilisent
+    relancés, le scheduler non.
+  - **Garde-fou.** Face à un vrai cluster, le chart `orderflow` échoue avec un message
+    explicite si l'un des Secrets (ou l'une de ses clés) manque :
+    `Secret/rabbitmq-credentials (clé username) absent du namespace orderflow : lancer
+    scripts/deploy-apps.ps1, qui le provisionne avant helm, ou le créer à la main (…)`.
+    Même technique que le contrôle du CRD du chart `rabbitmq` : la vérification n'a lieu que
+    si `lookup` du namespace `kube-system` répond ; `helm lint` et `helm template` restent
+    utilisables hors ligne. L'équivalent manuel (commandes `kubectl` / `rabbitmqctl`) est dans
+    les NOTES du chart et dans [exploitation.md](exploitation.md#identifiants-des-applications).
+- **Pourquoi `.*` sur le vhost `/` et pas des permissions plus fines ?** Les applications
+  déclarent elles-mêmes leurs files, exchanges et stream (`payments`, `inventory`,
+  `notifications`, `orders`, `orders.events`) et Celery crée sa topologie de *native delayed
+  delivery* (`celery_delayed_delivery`, `celery_delayed_0..27`, bindings `#.<file>`) : une
+  expression `configure` restreinte devrait suivre exactement ces noms et toute évolution de
+  Celery, pour un gain faible tant que tous les services partagent un utilisateur. L'essentiel
+  est obtenu : plus de droits d'administration (pas de création d'utilisateur ni de vhost, pas
+  d'UI ni d'API de management). Vérifié sans droits d'administration : déclarations de files
+  quorum, d'exchanges, du stream, topologie de delayed delivery, publisher confirms (démo,
+  replay, chaos), aucune erreur `ACCESS_REFUSED`.
+- **Alternatives non retenues.**
+
+  | Option | Principe | Pourquoi pas ici |
+  |---|---|---|
+  | **RabbitMQ Messaging Topology Operator** | CR `User` et `Permission` dans le namespace des applications ; l'opérateur crée l'utilisateur et un Secret d'identifiants à côté, de façon déclarative (et peut aussi gérer `Queue`, `Exchange`, `Policy`) | un opérateur de plus à installer, mettre à jour et faire tenir en mémoire, pour une démo qui n'a qu'un utilisateur ; la création par `rabbitmqctl` reste lisible en quelques lignes de script. Premier choix sur un vrai cluster, avec un utilisateur par service. |
+  | **External Secrets Operator** (ou équivalent : Vault, réplicateur de Secrets) | synchronise `redis-auth` (et des identifiants RabbitMQ) depuis un coffre ou d'un namespace à l'autre, avec rafraîchissement périodique | même coût (un opérateur et souvent un coffre) ; il ne crée pas l'utilisateur RabbitMQ lui-même. |
+  | Applications dans le namespace d'infrastructure | aucun Secret à copier | renonce à tout ce que la séparation apporte (ADR-16). |
+  | Secrets créés par le chart `orderflow` (lookup dans l'autre namespace) | le chart lirait `redis-auth` par `lookup` et créerait sa copie | `lookup` est désactivé en `helm template` et en dry-run client (rendu vide, donc un Secret vide en GitOps), et un chart applicatif n'a pas à lire les Secrets de l'infrastructure ; création de l'utilisateur RabbitMQ impossible depuis Helm de toute façon. |
+
+- **Conséquences.**
+  - Les applications n'ont plus aucun droit d'administration sur le broker ; l'administrateur
+    reste dans `orderflow-infra`, réservé à l'exploitation (UI de management).
+  - Le déploiement applicatif dépend d'une étape hors Helm (le script, ou l'équivalent manuel) ;
+    le garde-fou du chart rend son oubli explicite.
+  - Une rotation du mot de passe Redis demande un redémarrage complet de Redis (Redis et
+    Sentinel lisent le mot de passe au démarrage du pod), puis `deploy-apps.ps1` : procédure
+    dans [exploitation.md](exploitation.md#rotation-des-mots-de-passe). Celle du mot de passe
+    RabbitMQ se fait sans toucher au broker.
+  - `destroy.ps1 -KeepInfra` supprime aussi l'utilisateur `orderflow` (ses identifiants
+    disparaissent avec le namespace) ; un nouveau déploiement le recrée.
+
+### ADR-18 — Journaux structurés du gateway avec structlog
+
+- **Contexte.** Le gateway écrivait des lignes texte (`order accepted order_id=… …`) et
+  uvicorn son propre access log : rien de fiable à indexer pour un collecteur (Filebeat,
+  Fluent Bit, Loki), aucun moyen de relier les lignes d'une même requête, et les sondes de
+  Kubernetes (`/healthz`, `/readyz` toutes les 10 à 20 s par pod) noyaient le flux.
+- **Décision.** `structlog` 26.1, configuré dans un seul module
+  (`services/gateway/src/gateway/logs.py`) :
+  - **un objet JSON par ligne** sur stdout par défaut (`LOG_FORMAT=json`) : `timestamp`
+    ISO 8601 UTC, `level`, `logger`, `event` (nom court en snake_case : `order_accepted`,
+    `dependency_unavailable`, `http_request`…) et des champs clé/valeur, jamais de valeur
+    formatée dans le message. `LOG_FORMAT=console` donne un rendu lisible
+    (`dev/docker-compose.yml` l'utilise) ; `LOG_LEVEL` reste le niveau ; value
+    `gateway.logFormat` du chart ;
+  - **contexte de requête** (`structlog.contextvars`) : un middleware ASGI pur lie
+    `request_id` (en-tête `X-Request-ID` s'il est valide, sinon un uuid4, renvoyé dans la
+    réponse), `method` et `path`, puis émet **un événement d'accès par requête** (`status`,
+    `duration_ms`) ; l'access log d'uvicorn est coupé. `order_id` est lié dès qu'il est
+    connu (handler) et repris dans l'événement d'accès. Les handlers étant synchrones,
+    Starlette les exécute dans son threadpool avec une **copie** du contexte : le
+    `request_id` y est visible (vérifié par un test avec 8 requêtes simultanées sur 8
+    threads, sans mélange), mais ce que le handler lie ne remonte pas au middleware, d'où
+    le passage d'`order_id` par `request.state` ;
+  - **sondes** : `/healthz` et `/readyz` en DEBUG (sauf réponse 5xx), donc absentes au
+    niveau INFO ;
+  - **bibliothèques** (uvicorn.error, celery, kombu, amqp, redis) : passent par le même
+    `ProcessorFormatter` (*foreign pre-chain*) ; le flux reste du JSON homogène ;
+  - **exceptions** : `exc_info` devient un champ `exception` structuré (type, message,
+    frames) ; les `503` d'indisponibilité gardent une seule ligne `warning`
+    (`dependency_unavailable`, `error_type`, `error`) sans trace ;
+  - **secrets** : toute URL `scheme://user:mot-de-passe@` est masquée (`***`) dans tous les
+    champs avant rendu (les URL broker et Sentinel portent un mot de passe).
+- **Conséquences.** Exemple réel (cluster, pod gateway) :
+
+  ```json
+  {"customer_id": "cust_42", "total_amount": 44.3, "currency": "EUR", "event": "order_accepted", "request_id": "038cf900f22a411fa1f6ef2bee7215b9", "path": "/orders", "method": "POST", "order_id": "ord_6b094e269fdd4a65802e59ef99760872", "level": "info", "logger": "gateway.main", "timestamp": "2026-11-12T07:25:35.477097Z"}
+  {"status": 202, "duration_ms": 34.9, "order_id": "ord_6b094e269fdd4a65802e59ef99760872", "event": "http_request", "request_id": "038cf900f22a411fa1f6ef2bee7215b9", "path": "/orders", "method": "POST", "level": "info", "logger": "gateway.access", "timestamp": "2026-11-12T07:25:35.478357Z"}
+  ```
+
+  - Seul le gateway est concerné. Les workers, le scheduler et les subscribers gardent le
+    logging standard de Python (format texte de Celery et kombu) ; `subscriber-audit`
+    écrit déjà une ligne JSON brute par événement du stream (c'est sa fonction, cf.
+    [contracts.md §4](contracts.md#4-stream-dévénements)). Les convertir demanderait de
+    brancher structlog sur la configuration de logging de Celery (`after_setup_logger`) :
+    pas fait, à faire service par service si un collecteur l'exige.
+  - Une dépendance de plus (structlog, pure Python, sans dépendance transitive).
+  - Le `request_id` n'est pas propagé aux tâches Celery (en-tête de message) : le lien
+    entre une requête et le traitement asynchrone reste l'`order_id`.
+
+### ADR-19 — RabbitMQ sans opérateur (environnements restreints)
+
+- **Contexte.** La variante par défaut (ADR-01) suppose des droits d'administrateur du
+  cluster : CRD `rabbitmqclusters.rabbitmq.com`, ClusterRole, webhooks d'admission, et
+  cert-manager (lui-même des CRD et des webhooks). Le script la télécharge en plus depuis
+  GitHub (`k8s/operators/rabbitmq-cluster-operator`, ressource distante
+  `https://github.com/rabbitmq/cluster-operator/releases/download/v2.23.2/cluster-operator.yml`).
+  Certains environnements n'accordent que des droits sur un namespace et n'ont accès qu'à
+  un registre et à un dépôt de paquets internes.
+- **Décision.** Un second chart, `charts/rabbitmq-standalone`, installé par
+  `deploy-infra.ps1 -NoOperator` sous le **même nom de release** (`rabbitmq`) :
+  - uniquement des objets standard et namespacés : `StatefulSet/rabbitmq-server`,
+    `Service/rabbitmq` (5672, 15672, 5552, 15692), `Service/rabbitmq-nodes` (headless,
+    `publishNotReadyAddresses`), `ConfigMap/rabbitmq-config`, `Secret/rabbitmq-default-user`
+    (clés `username` / `password`, comme l'opérateur), `Secret/rabbitmq-erlang-cookie`,
+    `PDB/rabbitmq`. **Aucun RBAC** : ni ServiceAccount dédié, ni Role, ni RoleBinding,
+    `automountServiceAccountToken: false` ;
+  - **remplaçant direct** : mêmes noms d'objets, de pods, de PVC
+    (`persistence-rabbitmq-server-N`), de conteneur (`rabbitmq`) et de nœuds Erlang
+    (`rabbit@rabbitmq-server-N.rabbitmq-nodes.<namespace>`, noms longs) que l'opérateur :
+    applications, chart `orderflow`, scripts et documentation ne changent pas ;
+  - reprise de ce que génère l'opérateur (StatefulSet observé dans `orderflow-infra`) :
+    même image, mêmes plugins (management, prometheus, stream, stream management),
+    `additionalConfig` identique, `total_memory_available_override_value` = 80 % de
+    `limits.memory`, sonde de démarrage `reached-target-cluster-size`, readiness = port
+    AMQP, `preStop` `rabbitmq-upgrade await_online_quorum_plus_one` puis `drain` (et le
+    label `skipPreStopChecks`), `terminationGracePeriodSeconds: 300`,
+    `podManagementPolicy: Parallel`, securityContext non-root en lecture seule,
+    anti-affinité et répartition *preferred*, plus le PDB ;
+  - administrateur créé au premier démarrage par `default_user` / `default_pass`
+    **interpolés depuis l'environnement** (`$(RABBITMQ_ADMIN_PASSWORD)`, mécanisme de
+    `rabbitmq.conf` vérifié sur 4.3.7), l'environnement venant du Secret : le mot de passe
+    n'est jamais dans une ConfigMap. Secrets générés une fois puis conservés (`lookup`,
+    `helm.sh/resource-policy: keep`, comme `redis-auth`) ; `auth.existingSecret` et
+    `erlangCookie.existingSecret` pour fournir les siens ;
+  - image paramétrable (`image.registry`, `image.repository`, `image.tag`,
+    `imagePullSecrets`), comme désormais dans les charts `rabbitmq` et `redis` (le chart
+    `orderflow` avait déjà `image.registry`, `image.tag`, `imagePullSecrets`) ;
+  - même logique pour la construction des images applicatives : images de base en `ARG`
+    (`PYTHON_IMAGE`, `UV_IMAGE`) et index PyPI en `ARG UV_DEFAULT_INDEX` dans les six
+    Dockerfiles, sans directive `# syntax=` (qui ferait tirer `docker/dockerfile` depuis
+    Docker Hub) ; `uv.lock` enregistre pypi.org et `uv sync --locked` refuse un autre index
+    (constaté), donc avec un miroir le lock est d'abord résolu à nouveau contre lui et le
+    build échoue si une version épinglée change. `build-images.ps1 -BaseRegistry
+    -PythonImage -UvImage -PipIndexUrl -Registry -Push`.
+- **Pourquoi `classic_config` plutôt que la découverte Kubernetes ?** Le plugin
+  `rabbitmq_peer_discovery_k8s` interroge l'API Kubernetes (endpoints du Service headless) :
+  il faut un ServiceAccount, un Role (`get` sur `endpoints`) et un RoleBinding, objets que
+  certains environnements interdisent ou soumettent à validation. Depuis RabbitMQ 4.1 il
+  sait en revanche désigner un nœud d'amorçage (le pod d'ordinal le plus bas).
+  `classic_config` n'a besoin de rien : la liste des nœuds est connue d'avance (dérivée de
+  `replicas` et du Service headless). Son défaut : un nœud neuf qui ne joint aucun pair
+  forme son propre cluster ; si plusieurs nœuds vides démarrent ensemble, deux clusters
+  peuvent se former (problème connu en amont, rabbitmq-server#13043, corrigé seulement pour
+  le plugin k8s). Parade : l'init container (`files/init.sh`) fait attendre **un nœud sans
+  données d'ordinal > 0** jusqu'à ce qu'un pair serve déjà AMQP (donc ait fini de démarrer
+  dans un cluster) ; `rabbitmq-server-0` forme le cluster, les autres le rejoignent. Un nœud
+  qui a des données ne passe jamais par cette attente (redémarrage, rolling update, arrêt
+  complet). `deploy-infra.ps1` vérifie ensuite que **chaque** nœud voit tous les autres
+  (`cluster_status`), ce qui détecterait un cluster scindé.
+- **Comparaison honnête.**
+
+  | Sujet | Avec opérateur | Sans opérateur (ce chart) |
+  |---|---|---|
+  | Droits nécessaires | cluster-admin (CRD, ClusterRole, webhooks) + cert-manager | droits d'écriture sur un namespace |
+  | Téléchargements au déploiement | manifeste de l'opérateur depuis GitHub (`kubectl apply -k`), images de l'opérateur | aucun (charts locaux, images du registre configuré) |
+  | Mise à jour de version RabbitMQ | l'opérateur orchestre (redémarrage nœud par nœud, attentes, contrôles) | rolling update du StatefulSet + `preStop` ; **à vous** de lire les notes de version, de vérifier les feature flags et les sauts de version autorisés |
+  | Contrôle d'écart de versions | refuse certains changements dangereux | aucun : le chart applique ce que vous demandez |
+  | Scale-up | changer `replicas` | changer `replicas` : nouvelle liste de pairs = rolling update de tous les nœuds, puis `rabbitmq-queues grow` pour étendre les files existantes |
+  | Scale-down | non pris en charge non plus (opération manuelle) | manuel : `forget_cluster_node`, puis `replicas` |
+  | Rotation des secrets / certificats | Secret administrateur géré, TLS via cert-manager | manuelle (`rabbitmqctl change_password`, cookie : arrêt complet) |
+  | Rééquilibrage des leaders | `rabbitmq-queues rebalance` à la main dans les deux cas | idem |
+  | Configuration | CR déclarative, valeurs par défaut maintenues par l'équipe RabbitMQ | ConfigMap du chart, valeurs par défaut maintenues par nous |
+  | Objets créés | par l'opérateur (Helm ne les voit pas, `--wait` non plus) | par Helm (`helm get manifest`, `--wait` attend le StatefulSet) |
+  | Formation initiale | plugin k8s avec nœud d'amorçage | `classic_config` + attente du premier nœud (init container) |
+  | Mémoire au repos | + ~50 Mi (opérateur) | rien de plus |
+
+- **Conséquences.**
+  - Changer de variante n'est pas une mise à jour : les données (PVC), le cookie et la
+    propriété des objets diffèrent. `deploy-infra.ps1` refuse le changement avec un message
+    explicite ; `destroy.ps1 -RabbitmqOnly` désinstalle RabbitMQ (PVC, Secrets, checkpoints
+    des subscribers), puis `deploy-infra.ps1 [-NoOperator]` et `deploy-apps.ps1` recréent
+    tout (utilisateur `orderflow` compris). Files et stream sont perdus.
+  - Les scripts détectent la variante (chart de la release `rabbitmq`) : `chaos.ps1`,
+    `demo.ps1`, `replay-demo.ps1`, `deploy-apps.ps1` et `destroy.ps1` fonctionnent avec les
+    deux sans paramètre ; un `deploy.ps1` relancé garde la variante installée.
+  - Vérifié sur ce cluster (cf. [exploitation.md](exploitation.md#environnement-restreint--sans-opérateur-registre-interne)) :
+    formation, quorum queues et stream à 3 membres, démo, replay, chaos, suppression d'un
+    pod, rolling restart sous trafic, `helm upgrade` sans effet, installations à froid
+    répétées, arrêt complet puis redémarrage.
+  - Limites : la taille du cluster est écrite dans la configuration (la changer relance
+    tous les nœuds) ; un `rabbitmq-server-0` **sans données** n'attend personne : s'il perd
+    son volume et redémarre pendant que ses pairs sont eux aussi arrêtés, il peut former
+    seul un cluster vide (le relancer après les autres, cf. exploitation.md) ; perte de deux
+    volumes sur trois = perte du quorum (comme avec l'opérateur, restauration manuelle).
+    Pas de TLS (comme la variante par défaut).
 
 ## 3. Limites et pistes d'évolution
 
 | Limite | Impact | Piste |
 |---|---|---|
 | Cluster k8s **mono-nœud** | La haute disponibilité est démontrée contre la perte d'un *pod*, pas d'une machine. | Cluster multi-nœuds, anti-affinité *required*, zones. |
-| Utilisateur RabbitMQ par défaut partagé, vhost `/` | Tout service peut tout lire et tout supprimer. | Un utilisateur et des permissions par service (et éventuellement un vhost) via le **Messaging Topology Operator** (`User`, `Permission`, `Queue`, `Exchange`, `Policy` en CRD). |
-| Pas de NetworkPolicy, pas de TLS | Trafic AMQP et Redis en clair dans le cluster, joignable par tout pod. | NetworkPolicies par composant ; TLS via cert-manager (déjà présent) pour AMQP et Redis. |
+| Un seul utilisateur RabbitMQ applicatif (`orderflow`), permissions `.*` sur le vhost `/` | Plus de droits d'administration pour les applications (ADR-17), mais chaque service peut encore déclarer, lire ou purger les files des autres. | Un utilisateur par service avec des expressions `configure`/`write`/`read` limitées à ses files (et éventuellement un vhost), déclarés via le **Messaging Topology Operator** (`User`, `Permission`). |
+| Mot de passe Redis unique, copié dans le namespace des applications | Les applications ont le même mot de passe que la réplication et Sentinel ; une rotation demande un redémarrage complet de Redis. | ACL Redis (utilisateur applicatif distinct, `ACL SETUSER` avec deux mots de passe pendant une rotation) ; synchronisation par External Secrets. |
+| Identifiants provisionnés par script | Sans `deploy-apps.ps1`, il faut créer l'utilisateur et les Secrets à la main (le chart le signale) ; inadapté tel quel à du GitOps. | Messaging Topology Operator et External Secrets (ADR-17). |
+| Pas de NetworkPolicy, pas de quota, pas de TLS | La séparation en namespaces prépare la frontière mais rien ne l'impose : trafic AMQP et Redis en clair, joignable par tout pod du cluster ; aucune limite globale de ressources par namespace. | NetworkPolicy dans `orderflow-infra` n'admettant que le namespace `orderflow` (5672, 6379, 26379) et les pods de l'infrastructure entre eux ; `ResourceQuota` par namespace ; TLS via cert-manager (déjà présent) pour AMQP et Redis. |
 | Montants en `float` dans les payloads | Arrondis binaires (le hash `analytics:orders` affiche par ex. `639.79999999999999999`). | Montants en centimes entiers ou en chaînes décimales dans le contrat. |
 | `analytics:orders:seen` jamais purgé | Croissance non bornée (1 entrée par événement de commande ; les digests n'y entrent pas). | Fenêtre de déduplication (clé par jour avec TTL ≥ rétention du stream), ou filtre probabiliste. |
 | Liveness des workers pendant une longue coupure broker | Non mesuré : si la boucle d'événements cesse de tourner pendant les reconnexions, le heartbeat vieillit et Kubernetes redémarre les workers (sans gravité, mais bruyant). | Mesurer ; au besoin, élargir le seuil ou lier le heartbeat à l'état de connexion. |
 | Réplication Redis **asynchrone** | Lors d'un failover *non planifié*, les dernières écritures acquittées par l'ancien master peuvent être perdues (résultats de tâches, checkpoint, clé de suivi). Les bascules planifiées sont protégées par le `CLIENT PAUSE`. | `WAIT` sur les écritures critiques, ou stocker l'état métier ailleurs (base de données). |
 | `/readyz` du gateway dépend du broker et de Redis | Une panne partagée rend **tous** les pods du gateway non prêts en même temps (après 3 échecs à 10 s d'intervalle). | Readiness limitée à l'état local ; la dégradation passe par les `503` applicatifs. |
 | Pas de collecte de métriques ni d'autoscaling | Le plugin `rabbitmq_prometheus` expose `:15692` mais rien ne le lit. | Prometheus/Grafana (dashboards officiels RabbitMQ) ; **KEDA** pour scaler les workers sur la profondeur des files. |
-| Images sans registry ni CI | Tag `dev` mutable, `IfNotPresent` : la prise en compte d'un rebuild repose sur l'annotation `checksum/image` posée par `deploy-apps.ps1` (ADR-16), et `helm rollback` ne restaure pas l'ancien code. Ne fonctionne que si le cluster partage le démon docker. | CI qui teste, construit, signe et pousse des tags immuables dans un registry (`image.registry`, `image.tag`). |
-| Une installation par namespace | Noms d'objets fixes (contrat) : deux releases `orderflow` dans le même namespace entreraient en conflit. | Un namespace par environnement ; préfixer les noms seulement si le besoin de plusieurs instances par namespace apparaît. |
+| Images sans registry ni CI | Tag `dev` mutable, `IfNotPresent` : la prise en compte d'un rebuild repose sur l'annotation `checksum/image` posée par `deploy-apps.ps1` (ADR-16), et `helm rollback` ne restaure pas l'ancien code. Ne fonctionne que si le cluster partage le démon docker. | CI qui teste, construit, signe et pousse des tags immuables dans un registry (`build-images.ps1 -Registry … -Push`, values `image.registry`, `image.tag` ; images de base et index PyPI internes : `-BaseRegistry`, `-PipIndexUrl`, cf. ADR-19). |
+| Une installation par namespace | Noms d'objets fixes (contrat) : deux releases `orderflow` (ou `redis`) dans le même namespace entreraient en conflit. | Une paire de namespaces par environnement (`-Namespace` / `-InfraNamespace`, value `infraNamespace`) ; préfixer les noms seulement si le besoin de plusieurs instances par namespace apparaît. |
 | Pas de dead-letter pour les tâches | Une tâche qui épuise ses retries finit en `FAILURE` (et déclenche l'errback) ; un message qui fait crasher le worker est redélivré jusqu'à la *delivery limit* des quorum queues puis abandonné. | Politique de dead-letter sur les files de tâches et alerte. |
 | Pas de clé d'idempotence côté client sur `POST /orders` | Un client qui réessaie après un timeout ou une `503` ambiguë (publication confirmée par le broker mais réponse perdue) crée une seconde commande. | En-tête `Idempotency-Key` mémorisé dans Redis (`SET NX`) et réutilisé comme base de l'`order_id`. |
 | Scheduler mono-réplica | Pas de digest pendant un redémarrage du beat, pas de rattrapage (ADR-15). | Acceptable pour un instantané ; sinon verrou distribué (RedBeat) avec plusieurs beats en attente. |

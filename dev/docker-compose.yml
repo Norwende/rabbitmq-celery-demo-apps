@@ -90,7 +90,9 @@ services:
     <<: *app
     build: ../services/gateway
     image: orderflow/gateway:dev
-    environment: *app-env
+    environment:
+      <<: *app-env
+      LOG_FORMAT: console   # structlog, human-readable in a terminal (json in Kubernetes)
     ports: ["127.0.0.1:18000:8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]

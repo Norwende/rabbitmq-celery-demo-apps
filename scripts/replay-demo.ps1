@@ -21,6 +21,10 @@
   Délai maximal d'attente du replay complet (défaut 120).
 .PARAMETER SkipCheckpoint
   N'exécute que la partie 1 (replay).
+.PARAMETER Namespace
+  Namespace des applications (défaut : orderflow).
+.PARAMETER InfraNamespace
+  Namespace de RabbitMQ et Redis (défaut : orderflow-infra).
 .PARAMETER Context
   Contexte kubectl à utiliser (défaut : contexte courant).
 .EXAMPLE
@@ -30,6 +34,8 @@
 param(
     [int]$TimeoutSeconds = 120,
     [switch]$SkipCheckpoint,
+    [string]$Namespace = 'orderflow',
+    [string]$InfraNamespace = 'orderflow-infra',
     [string]$Context = ''
 )
 

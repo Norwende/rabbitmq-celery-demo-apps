@@ -1,6 +1,6 @@
 {{- /* Un Deployment worker-<clé> par entrée de .Values.workers (même gabarit Celery). */}}
 {{- range $key, $worker := .Values.workers }}
-{{- $ctx := dict "root" $ "name" (printf "worker-%s" $key) "component" "worker" "image" $worker.image }}
+{{- $ctx := dict "root" $ "name" (printf "worker-%s" $key) "component" "worker" "image" $worker.image "redis" true }}
 ---
 apiVersion: apps/v1
 kind: Deployment

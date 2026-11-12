@@ -134,19 +134,34 @@ def assert_503(response, dependency: str) -> None:
     assert response.json() == {"detail": f"{dependency} temporarily unavailable, retry later"}
 
 
-def test_post_order_returns_202_and_the_order_is_trackable(client_with, redis):
-    response = client_with(redis).post("/orders", json=BODY)
+def test_post_order_returns_202_and_the_order_is_trackable(client_with, redis, logs):
+    response = client_with(redis).post("/orders", json=BODY, headers={"X-Request-ID": "req-1"})
     assert response.status_code == 202
-    assert order_key(response.json()["order_id"]) in redis.data
+    order_id = response.json()["order_id"]
+    assert order_key(order_id) in redis.data
+
+    (accepted,) = logs.events("order_accepted")
+    assert {k: accepted[k] for k in ("request_id", "method", "path", "order_id", "customer_id",
+                                     "total_amount", "currency")} == {
+        "request_id": "req-1", "method": "POST", "path": "/orders", "order_id": order_id,
+        "customer_id": "c", "total_amount": 9.99, "currency": "EUR",
+    }
+    (access,) = logs.events("http_request")
+    assert (access["status"], access["order_id"], access["request_id"]) == (202, order_id, "req-1")
 
 
 @pytest.mark.parametrize("error", [RedisConnectionError("down"), RedisTimeoutError("slow"), ReadOnlyError("replica")])
-def test_post_order_returns_503_when_redis_is_unavailable(client_with, error, caplog):
+def test_post_order_returns_503_when_redis_is_unavailable(client_with, error, logs):
     response = client_with(FakeRedis(fail_on={"set"}, error=error)).post("/orders", json=BODY)
     assert_503(response, "redis")
-    assert [r.message for r in caplog.records if "503" in r.message] == [
-        f"POST /orders -> 503: redis unavailable ({type(error).__name__}: {error})"
-    ]
+    # A single warning line, without traceback; the access event follows.
+    (warning,) = [e for e in logs.events() if e["level"] == "warning"]
+    assert {k: warning[k] for k in ("event", "dependency", "status", "error_type", "error", "method", "path")} == {
+        "event": "dependency_unavailable", "dependency": "redis", "status": 503,
+        "error_type": type(error).__name__, "error": str(error), "method": "POST", "path": "/orders",
+    }
+    assert "exception" not in warning
+    assert [e["status"] for e in logs.events("http_request")] == [503]
 
 
 def test_post_order_returns_503_and_leaves_no_key_when_the_broker_is_unavailable(client_with, redis):

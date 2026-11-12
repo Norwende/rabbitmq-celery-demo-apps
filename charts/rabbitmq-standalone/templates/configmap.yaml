@@ -1,0 +1,18 @@
+# Configuration de RabbitMQ, montée dans /etc/rabbitmq/conf.d (fichiers chargés par ordre
+# alphabétique) et liste des plugins activés. Aucun secret ici : default_user / default_pass
+# sont interpolés depuis l'environnement du conteneur (Secret).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+data:
+  10-orderflow.conf: |
+    {{- include "rabbitmq.baseConfig" . | nindent 4 }}
+  90-userDefinedConfiguration.conf: |
+    {{- .Values.additionalConfig | trim | nindent 4 }}
+  enabled_plugins: {{ include "rabbitmq.enabledPlugins" . | quote }}
+  # Init container (files/init.sh) : cookie Erlang, attente d'un pair par un nœud neuf.
+  init.sh: |
+    {{- .Files.Get "files/init.sh" | nindent 4 }}

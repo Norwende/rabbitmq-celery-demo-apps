@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "redis values",
+  "type": "object",
+  "required": ["image", "replicas", "masterName", "persistence", "sentinel", "auth"],
+  "properties": {
+    "clusterDomain": { "type": "string", "minLength": 1 },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "registry": { "type": "string" },
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 3,
+      "description": "1 master + réplicas, un sentinel par pod : 3 au minimum pour un quorum de 2."
+    },
+    "masterName": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+    "maxmemory": { "type": "string", "pattern": "^[0-9]+(kb|mb|gb)$" },
+    "resources": { "type": "object" },
+    "persistence": {
+      "type": "object",
+      "required": ["size"],
+      "properties": {
+        "storageClassName": { "type": "string" },
+        "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti)?$" }
+      },
+      "additionalProperties": false
+    },
+    "sentinel": {
+      "type": "object",
+      "properties": {
+        "quorum": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "init": {
+      "type": "object",
+      "properties": { "resources": { "type": "object" } },
+      "additionalProperties": false
+    },
+    "auth": {
+      "type": "object",
+      "properties": { "existingSecret": { "type": "string" } },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,4 +1,4 @@
-{{- $ctx := dict "root" $ "name" "scheduler" "component" "scheduler" "image" .Values.scheduler.image }}
+{{- $ctx := dict "root" $ "name" "scheduler" "component" "scheduler" "image" .Values.scheduler.image "redis" false }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

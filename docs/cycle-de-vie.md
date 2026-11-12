@@ -111,7 +111,7 @@ def submit_order(order: dict, redis: Redis, ttl_seconds: int) -> None:
         try:
             redis.delete(key)
         except RedisError as exc:
-            logger.warning("could not remove tracking key %s after a failed publish: %s", key, exc)
+            logger.warning("tracking_key_cleanup_failed", key=key, error_type=type(exc).__name__, error=str(exc))
         raise
 ```
 
@@ -141,11 +141,18 @@ La file `payments` n'est pas configurée dans le gateway : Celery la crée à la
 **Publication confirmée.** `broker_transport_options={"confirm_publish": True}` : `apply_async`
 ne rend la main qu'après l'accusé du broker, donc après écriture sur une majorité des membres de
 la quorum queue. Côté gateway, `task_publish_retry_policy` réessaie pendant ~6 s (reconnexion
-via le Service `rabbitmq` si le nœud derrière la connexion a disparu).
+via le Service `rabbitmq` du namespace `orderflow-infra`, `RABBITMQ_HOST=rabbitmq.orderflow-infra.svc.cluster.local`,
+si le nœud derrière la connexion a disparu). Le gateway, comme toutes les applications, se
+connecte avec l'utilisateur dédié `orderflow` (sans droit d'administration, cf.
+[architecture.md, ADR-17](architecture.md#adr-17--identifiants-des-applications-utilisateur-rabbitmq-dédié-et-secrets-provisionnés-par-script)).
 
 **Réponses.** `202 {order_id, status_url}`. Si Redis ou le broker restent injoignables malgré les
 retries : `503` avec `Retry-After: 5` (gestionnaires d'exception de `main.py` pour
 `redis.ConnectionError`, `redis.TimeoutError`, `ReadOnlyError` et `kombu.exceptions.OperationalError`).
+Journal du gateway (JSON, [ADR-18](architecture.md#adr-18--journaux-structurés-du-gateway-avec-structlog)) :
+`order_accepted` puis `http_request` (`status: 202`), tous deux avec `order_id` et le
+`request_id` renvoyé au client dans `X-Request-ID` ; pour une `503`, une seule ligne
+`dependency_unavailable` (warning, sans trace) puis `http_request` (`status: 503`).
 
 ### 2.2 `payments.authorize`
 
@@ -497,7 +504,7 @@ sequenceDiagram
     S->>Rp: promotion (REPLICAOF NO ONE), réplicas reconfigurés
     App-xM: écritures bloquées puis connexion coupée à l'arrêt du pod
     App->>S: SENTINEL get-master-addr-by-name orderflow
-    S-->>App: redis-1.redis-headless…
+    S-->>App: redis-1.redis-headless.orderflow-infra.svc.cluster.local
     App->>Rp: retry de la commande
     Note over M: le pod revient, init.sh interroge les sentinels → démarre en réplica de redis-1
 ```
@@ -509,11 +516,14 @@ sentinels doivent d'abord constater la panne (`down-after-milliseconds 5000`, qu
 d'élire un réplica : la fenêtre d'indisponibilité est plus longue (non mesurée ici), et c'est le
 cas où `init.sh` attend jusqu'à 20 s le failover avant de redémarrer l'ancien master en réplica.
 
-Les clients interrogent Sentinel via le Service `redis-sentinel` (`REDIS_SENTINELS`), qui ne
-route que vers les pods prêts : le pod supprimé sort des endpoints dès le début de son arrêt.
-Avec l'ancienne liste `redis-0..2.redis-headless`, la perte de `redis-0` (premier de la liste)
-ajoutait ~5 s de résolution DNS du pod disparu à chaque redécouverte du master : POST le plus
-lent 7,2 s, contre 2,2 s avec le Service (mesures `chaos.ps1`, master = `redis-0`).
+Les clients (namespace `orderflow`) interrogent Sentinel via le Service `redis-sentinel` du
+namespace `orderflow-infra` (`REDIS_SENTINELS=redis-sentinel.orderflow-infra.svc.cluster.local:26379`),
+qui ne route que vers les pods prêts : le pod supprimé sort des endpoints dès le début de son
+arrêt. Sentinel répond par le FQDN du nouveau master, résolvable depuis le namespace des
+applications. Avec l'ancienne liste `redis-0..2.redis-headless`, la perte de `redis-0` (premier
+de la liste) ajoutait ~5 s de résolution DNS du pod disparu à chaque redécouverte du master :
+POST le plus lent 7,2 s, contre 2,2 s avec le Service (mesures `chaos.ps1`, master = `redis-0`) ;
+après la séparation en deux namespaces, 2,0 à 2,2 s (une valeur isolée à 7,7 s, non reproduite).
 
 Comportement des clients pendant la fenêtre :
 
@@ -530,8 +540,9 @@ acquittées par l'ancien master mais pas encore répliquées sont perdues (répl
 
 - Les quorum queues et le stream ont 3 membres : la perte d'un nœud laisse une majorité, un
   nouveau leader est élu si besoin, aucune donnée confirmée n'est perdue.
-- Les clients connectés à ce nœud perdent leur connexion et se reconnectent via le Service
-  `rabbitmq` sur un nœud survivant : workers Celery (reconnexion du consumer ; les messages
+- Les clients connectés à ce nœud perdent leur connexion (`CONNECTION_FORCED - Node was put
+  into maintenance mode` lors d'un arrêt gracieux) et se reconnectent via le Service
+  `rabbitmq` (namespace `orderflow-infra`) sur un nœud survivant : workers Celery (reconnexion du consumer ; les messages
   non acquittés du nœud perdu sont relivrés → rejeu idempotent), gateway (retry de publication
   ~6 s puis `503`), notifier (retry kombu puis `autoretry`), subscribers (`ConsumerMixin`, réattache
   à `last_offset + 1`).
