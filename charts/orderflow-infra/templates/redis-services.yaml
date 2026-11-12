@@ -1,0 +1,42 @@
+# Service headless : identité DNS stable de chaque pod (redis-N.redis-headless).
+# publishNotReadyAddresses : les pods doivent se résoudre entre eux AVANT d'être Ready
+# (bootstrap, découverte Sentinel, resynchronisation d'un réplica).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+    - name: sentinel
+      port: 26379
+      targetPort: sentinel
+---
+# Point d'entrée Sentinel pour les clients (REDIS_SENTINELS=redis-sentinel:26379).
+# Pas de Service "master" : les clients découvrent le master via Sentinel.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: sentinel
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: sentinel

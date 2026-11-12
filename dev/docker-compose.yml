@@ -1,0 +1,155 @@
+# Local development environment for OrderFlow (not Kubernetes).
+#   docker compose -f dev/docker-compose.yml up -d --build
+# Gateway: http://localhost:18000  |  RabbitMQ management: http://localhost:15673 (orderflow/orderflow)
+name: orderflow-dev
+
+x-app-env: &app-env
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_VHOST: /
+  RABBITMQ_USER: orderflow
+  RABBITMQ_PASSWORD: orderflow
+  REDIS_SENTINELS: sentinel:26379
+  REDIS_MASTER_NAME: orderflow
+  REDIS_PASSWORD: orderflow-redis
+  REDIS_DB: "0"
+  LOG_LEVEL: INFO
+
+# Same constraints as in Kubernetes: read-only root filesystem, writable /tmp only.
+x-app: &app
+  read_only: true
+  tmpfs: [/tmp]
+  restart: unless-stopped
+  depends_on:
+    rabbitmq: {condition: service_healthy}
+    sentinel: {condition: service_healthy}
+
+x-worker-probes: &worker-probes
+  healthcheck:
+    test: ["CMD-SHELL", "test -f /tmp/celery-ready && find /tmp/celery-heartbeat -newermt '-60 seconds' | grep -q ."]
+    interval: 10s
+    start_period: 20s
+
+x-scheduler-probes: &scheduler-probes
+  healthcheck:
+    test: ["CMD-SHELL", "find /tmp/beat-heartbeat -newermt '-60 seconds' | grep -q ."]
+    interval: 10s
+    start_period: 20s
+
+x-subscriber-probes: &subscriber-probes
+  healthcheck:
+    test: ["CMD-SHELL", "find /tmp/subscriber-heartbeat -newermt '-60 seconds' | grep -q ."]
+    interval: 10s
+    start_period: 20s
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.3.7-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: orderflow
+      RABBITMQ_DEFAULT_PASS: orderflow
+    ports: ["127.0.0.1:15673:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  redis:
+    image: redis:8.10.3-alpine
+    command: ["redis-server", "--requirepass", "orderflow-redis", "--masterauth", "orderflow-redis",
+              "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "orderflow-redis", "--no-auth-warning", "ping"]
+      interval: 5s
+
+  sentinel:
+    image: redis:8.10.3-alpine
+    depends_on:
+      redis: {condition: service_healthy}
+    # Sentinel rewrites its config file, so it is generated in a writable location.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26379
+        requirepass orderflow-redis
+        sentinel resolve-hostnames yes
+        sentinel announce-hostnames yes
+        sentinel monitor orderflow redis 6379 1
+        sentinel auth-pass orderflow orderflow-redis
+        sentinel down-after-milliseconds orderflow 5000
+        EOF
+        exec redis-sentinel /tmp/sentinel.conf
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 26379 -a orderflow-redis --no-auth-warning sentinel get-master-addr-by-name orderflow | grep -q redis"]
+      interval: 5s
+
+  gateway:
+    <<: *app
+    build: ../services/gateway
+    image: orderflow/gateway:dev
+    environment: *app-env
+    ports: ["127.0.0.1:18000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 10s
+
+  worker-payments:
+    <<: [*app, *worker-probes]
+    build: ../services/worker-payments
+    image: orderflow/worker-payments:dev
+    environment: *app-env
+
+  worker-inventory:
+    <<: [*app, *worker-probes]
+    build: ../services/worker-inventory
+    image: orderflow/worker-inventory:dev
+    environment: *app-env
+
+  worker-notifier:
+    <<: [*app, *worker-probes]
+    build: ../services/worker-notifier
+    image: orderflow/worker-notifier:dev
+    environment: *app-env
+
+  # Exactly one beat (never scale this service): two beats would send every tick twice.
+  scheduler:
+    <<: [*app, *scheduler-probes]
+    build: ../services/scheduler
+    image: orderflow/scheduler:dev
+    environment:
+      <<: *app-env
+      DIGEST_CRON: "* * * * *"
+      DIGEST_EXPIRES_SECONDS: "50"
+
+  subscriber-analytics:
+    <<: [*app, *subscriber-probes]
+    build: ../services/subscriber
+    image: orderflow/subscriber:dev
+    environment:
+      <<: *app-env
+      SUBSCRIBER_NAME: analytics
+      STREAM_OFFSET: first
+      CHECKPOINT_ENABLED: "true"
+
+  subscriber-audit:
+    <<: [*app, *subscriber-probes]
+    build: ../services/subscriber
+    image: orderflow/subscriber:dev
+    environment:
+      <<: *app-env
+      SUBSCRIBER_NAME: audit
+      STREAM_OFFSET: first
+      CHECKPOINT_ENABLED: "true"
+
+  subscriber-live:
+    <<: [*app, *subscriber-probes]
+    build: ../services/subscriber
+    image: orderflow/subscriber:dev
+    environment:
+      <<: *app-env
+      SUBSCRIBER_NAME: live
+      STREAM_OFFSET: next
+      CHECKPOINT_ENABLED: "false"

@@ -1,0 +1,35 @@
+{{- /*
+helm test : GET /readyz sur Service/gateway (broker et Redis joignables depuis le gateway).
+Image du gateway (déjà présente, Python inclus) : aucune image supplémentaire à tirer.
+Pod supprimé si le test réussit ; conservé en cas d'échec pour lire ses logs.
+*/}}
+{{- $ctx := dict "root" $ "name" "gateway-test" "component" "test" "image" .Values.gateway.image }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gateway-test
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- include "orderflow.podSpecCommon" $ | nindent 2 }}
+  containers:
+    - name: readyz
+      image: {{ include "orderflow.image" $ctx }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - python
+        - -c
+        - |
+          import json, urllib.request
+          url = "http://gateway:{{ .Values.gateway.service.port }}/readyz"
+          with urllib.request.urlopen(url, timeout=10) as response:
+              print(response.status, json.dumps(json.load(response)))
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 64Mi}
+      securityContext:
+        {{- include "orderflow.containerSecurityContext" $ | nindent 8 }}

@@ -1,0 +1,15 @@
+OrderFlow (images {{ include "orderflow.image" (dict "root" $ "image" "<service>") }}) déployé dans le namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+Deployments : gateway ×{{ .Values.gateway.replicas }}{{ range $key, $w := .Values.workers }}, worker-{{ $key }} ×{{ $w.replicas }}{{ end }}, scheduler ×1{{ range $key, $s := .Values.subscribers }}, subscriber-{{ $key }}{{ end }}.
+
+Gateway :
+  kubectl -n {{ .Release.Namespace }} port-forward svc/gateway 8000:{{ .Values.gateway.service.port }}
+  Invoke-RestMethod http://localhost:8000/readyz          # ou : curl http://localhost:8000/readyz
+
+Vérifier :
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}            # GET /readyz depuis le cluster
+  kubectl -n {{ .Release.Namespace }} get deploy,pod -l app.kubernetes.io/instance={{ .Release.Name }}
+  ./scripts/demo.ps1                                       # 3 commandes de bout en bout
+
+Tag mutable "{{ include "orderflow.tag" . }}" : après un rebuild, ./scripts/deploy-apps.ps1 transmet l'empreinte du contenu
+de chaque image (imageIds) et seuls les pods dont l'image a changé sont relancés.

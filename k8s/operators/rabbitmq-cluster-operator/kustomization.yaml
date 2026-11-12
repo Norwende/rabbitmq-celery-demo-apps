@@ -1,0 +1,31 @@
+# RabbitMQ Cluster Operator (officiel), installé AVANT la release Helm orderflow-infra
+# (charts/orderflow-infra). Pas de chart Helm officiel : il reste hors Helm.
+# Manifeste de release épinglé : CRDs + RBAC + Deployment dans le namespace rabbitmq-system.
+# Depuis la 2.2x, le manifeste inclut des webhooks d'admission dont les certificats
+# sont émis par cert-manager (Issuer self-signed) : cert-manager doit être présent.
+#
+# Appliquer en server-side (le CRD RabbitmqCluster dépasse la limite de taille
+# de l'annotation last-applied-configuration) :
+#   kubectl apply --server-side -k k8s/operators/rabbitmq-cluster-operator
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - https://github.com/rabbitmq/cluster-operator/releases/download/v2.23.2/cluster-operator.yml
+
+patches:
+  # Le nœud est partagé : l'opérateur consomme ~50 Mi en pratique,
+  # la réservation upstream (500Mi requests = limits) est inutilement haute.
+  - target:
+      kind: Deployment
+      name: rabbitmq-cluster-operator
+      namespace: rabbitmq-system
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi

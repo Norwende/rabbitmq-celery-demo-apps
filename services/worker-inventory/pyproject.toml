@@ -1,0 +1,23 @@
+[project]
+name = "orderflow-worker-inventory"
+version = "0.1.0"
+description = "OrderFlow Celery worker: inventory.reserve (queue inventory)."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "celery[redis]==5.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.8,<0.11"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "inventory"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

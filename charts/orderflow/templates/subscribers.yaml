@@ -1,0 +1,62 @@
+{{- /* Un Deployment subscriber-<clé> par entrée de .Values.subscribers (image unique). */}}
+{{- range $key, $sub := .Values.subscribers }}
+{{- $ctx := dict "root" $ "name" (printf "subscriber-%s" $key) "component" "subscriber" "image" "subscriber" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: subscriber-{{ $key }}
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  # Never two instances of the same subscriber: they would share the checkpoint key.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "orderflow.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orderflow.podLabels" $ctx | nindent 8 }}
+      annotations:
+        {{- include "orderflow.podAnnotations" $ctx | nindent 8 }}
+    spec:
+      {{- include "orderflow.podSpecCommon" $ | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: subscriber
+          image: {{ include "orderflow.image" $ctx }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          envFrom:
+            {{- include "orderflow.envFrom" $ | nindent 12 }}
+          env:
+            - name: SUBSCRIBER_NAME
+              value: {{ $key | quote }}
+            {{- with $sub.role }}
+            - name: SUBSCRIBER_ROLE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: STREAM_OFFSET
+              value: {{ $sub.offset | quote }}
+            - name: CHECKPOINT_ENABLED
+              value: {{ $sub.checkpoint | quote }}
+            {{- include "orderflow.secretEnv" (dict "root" $ "redis" true) | nindent 12 }}
+          # The consume loop touches this file every few seconds (also while idle).
+          livenessProbe:
+            exec:
+              command: [sh, -c, 'find /tmp/subscriber-heartbeat -newermt "-60 seconds" | grep -q .']
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $sub.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            {{- include "orderflow.tmpVolumeMount" $ | nindent 12 }}
+      volumes:
+        {{- include "orderflow.tmpVolume" $ | nindent 8 }}
+{{- end }}

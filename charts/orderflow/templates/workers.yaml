@@ -1,0 +1,60 @@
+{{- /* Un Deployment worker-<clé> par entrée de .Values.workers (même gabarit Celery). */}}
+{{- range $key, $worker := .Values.workers }}
+{{- $ctx := dict "root" $ "name" (printf "worker-%s" $key) "component" "worker" "image" $worker.image }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-{{ $key }}
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "orderflow.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orderflow.podLabels" $ctx | nindent 8 }}
+      annotations:
+        {{- include "orderflow.podAnnotations" $ctx | nindent 8 }}
+    spec:
+      {{- include "orderflow.podSpecCommon" $ | nindent 6 }}
+      # Celery warm shutdown on SIGTERM waits for running tasks (task_time_limit=30s).
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: {{ include "orderflow.image" $ctx }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          envFrom:
+            {{- include "orderflow.envFrom" $ | nindent 12 }}
+          env:
+            - name: WORKER_CONCURRENCY
+              value: {{ $worker.concurrency | quote }}
+            {{- include "orderflow.secretEnv" (dict "root" $ "redis" true) | nindent 12 }}
+          # Files maintained by the worker itself (see probes.py): no "celery inspect".
+          startupProbe:
+            exec:
+              command: [test, -f, /tmp/celery-ready]
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [test, -f, /tmp/celery-ready]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [sh, -c, 'find /tmp/celery-heartbeat -newermt "-60 seconds" | grep -q .']
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            {{- include "orderflow.tmpVolumeMount" $ | nindent 12 }}
+      volumes:
+        {{- include "orderflow.tmpVolume" $ | nindent 8 }}
+{{- end }}

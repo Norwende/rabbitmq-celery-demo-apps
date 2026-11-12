@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "orderflow values",
+  "type": "object",
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "worker": {
+      "type": "object",
+      "required": ["image", "replicas", "concurrency"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "replicas": { "type": "integer", "minimum": 0 },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "additionalProperties": false
+    },
+    "subscriber": {
+      "type": "object",
+      "required": ["offset", "checkpoint"],
+      "properties": {
+        "offset": {
+          "description": "STREAM_OFFSET : first, next ou un offset entier.",
+          "oneOf": [
+            { "type": "string", "pattern": "^(first|next|last|[0-9]+)$" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "checkpoint": { "type": "boolean" },
+        "role": { "type": "string", "enum": ["", "analytics", "audit", "live"] },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": { "type": "array" },
+    "imageIds": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] },
+    "rabbitmq": {
+      "type": "object",
+      "required": ["host", "port", "vhost", "secretName"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "vhost": { "type": "string", "minLength": 1 },
+        "secretName": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "redis": {
+      "type": "object",
+      "required": ["sentinels", "masterName", "secretName"],
+      "properties": {
+        "sentinels": { "type": "string", "pattern": "^[^,:\\s]+:[0-9]+(,[^,:\\s]+:[0-9]+)*$" },
+        "masterName": { "type": "string", "minLength": 1 },
+        "db": { "type": "integer", "minimum": 0 },
+        "secretName": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "gateway": {
+      "type": "object",
+      "required": ["image", "replicas"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "replicas": { "type": "integer", "minimum": 0 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "workers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/worker" }
+    },
+    "scheduler": {
+      "description": "Celery beat : toujours 1 réplica (pas de clé replicas).",
+      "type": "object",
+      "required": ["image", "digest"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "digest": {
+          "type": "object",
+          "properties": {
+            "cron": { "type": "string", "pattern": "^\\S+( \\S+){4}$" },
+            "expiresSeconds": { "type": "integer", "minimum": 1, "maximum": 59 }
+          },
+          "additionalProperties": false
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "additionalProperties": false
+    },
+    "subscribers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/subscriber" }
+    }
+  }
+}

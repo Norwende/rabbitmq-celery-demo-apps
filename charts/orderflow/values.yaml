@@ -1,0 +1,112 @@
+# Valeurs par défaut du chart orderflow (applications). Les noms des objets sont fixes
+# (gateway, worker-payments, orderflow-config…, cf. docs/contracts.md) : une seule
+# installation par namespace, à côté de la release orderflow-infra.
+
+# Images : [<registry>/]orderflow/<nom>:<tag>. Par défaut orderflow/<nom>:dev, construites
+# localement (scripts/build-images.ps1) et lues par k3s/Rancher Desktop dans le démon docker.
+# Sur un vrai cluster : pousser les images et renseigner registry (ex. registry.example.com/team).
+image:
+  registry: ""
+  tag: ""            # vide => appVersion du chart (dev)
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Empreinte du contenu de chaque image locale (sha256 des couches et de la configuration),
+# par nom d'image : posée en annotation checksum/image sur les pods qui l'utilisent. Le tag
+# "dev" étant mutable, c'est ce qui relance les pods après un rebuild — et seulement si le
+# contenu a changé. Renseigné par scripts/deploy-apps.ps1 ; inutile avec des tags immuables.
+#   gateway: sha256:…    subscriber: sha256:…
+imageIds: {}
+
+# Configuration commune (ConfigMap/orderflow-config, cf. docs/contracts.md §2). Toute
+# modification relance les pods (annotation checksum/config).
+logLevel: INFO
+rabbitmq:
+  host: rabbitmq
+  port: 5672
+  vhost: /
+  # Secret créé par le RabbitMQ Cluster Operator (clés username / password).
+  secretName: rabbitmq-default-user
+redis:
+  # Service ClusterIP plutôt que la liste des pods : il ne route que vers les pods Ready
+  # (un pod supprimé sort des endpoints immédiatement). Avec la liste redis-0..2, la perte
+  # de redis-0 coûtait ~5 s de résolution DNS du pod disparu (POST max 7,2 s contre 2,2 s).
+  sentinels: redis-sentinel:26379
+  masterName: orderflow
+  db: 0
+  # Secret créé par orderflow-infra (clé password).
+  secretName: redis-auth
+
+gateway:
+  image: gateway
+  replicas: 2
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  service:
+    type: ClusterIP
+    port: 8000
+
+# Un Deployment worker-<clé> par entrée (même gabarit). Sans état, files partagées :
+# replicas librement augmentable. La file consommée est fixée par le code (contrat).
+workers:
+  payments:
+    image: worker-payments
+    replicas: 1
+    concurrency: 2     # WORKER_CONCURRENCY (processus prefork par pod)
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  inventory:
+    image: worker-inventory
+    replicas: 1
+    concurrency: 2
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  notifier:
+    image: worker-notifier
+    replicas: 1
+    concurrency: 2
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+
+# Celery beat : TOUJOURS 1 réplica et stratégie Recreate (non configurable : deux beats
+# enverraient chaque tick deux fois).
+scheduler:
+  image: scheduler
+  digest:
+    cron: "* * * * *"     # DIGEST_CRON : crontab à 5 champs, UTC
+    expiresSeconds: 50    # DIGEST_EXPIRES_SECONDS : 1..59
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+
+# Un Deployment subscriber-<clé> par entrée (image orderflow/subscriber, SUBSCRIBER_NAME=<clé>).
+# Toujours 1 réplica + Recreate : deux instances partageraient la clé de checkpoint.
+#   offset     : STREAM_OFFSET au premier démarrage (first, next ou un entier)
+#   checkpoint : CHECKPOINT_ENABLED (reprise sur l'offset sauvegardé dans Redis)
+#   role       : SUBSCRIBER_ROLE (comportement : analytics, audit ou live) ; vide => la clé
+subscribers:
+  analytics:
+    offset: first
+    checkpoint: true
+    role: ""
+    resources:
+      requests: {cpu: 20m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+  audit:
+    offset: first
+    checkpoint: true
+    role: ""
+    resources:
+      requests: {cpu: 20m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+  live:
+    offset: next
+    checkpoint: false
+    role: ""
+    resources:
+      requests: {cpu: 20m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}

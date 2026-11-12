@@ -1,0 +1,62 @@
+{{- $ctx := dict "root" $ "name" "scheduler" "component" "scheduler" "image" .Values.scheduler.image }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+spec:
+  # Exactly one beat: two beats would send every tick twice. Recreate stops the old pod
+  # before starting the new one (a RollingUpdate would overlap them during a rollout).
+  # Deliberately not configurable.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "orderflow.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orderflow.podLabels" $ctx | nindent 8 }}
+      annotations:
+        {{- include "orderflow.podAnnotations" $ctx | nindent 8 }}
+    spec:
+      {{- include "orderflow.podSpecCommon" $ | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: scheduler
+          image: {{ include "orderflow.image" $ctx }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            {{- include "orderflow.envFrom" $ | nindent 12 }}
+          env:
+            # crontab "minute hour day-of-month month day-of-week", UTC.
+            - name: DIGEST_CRON
+              value: {{ .Values.scheduler.digest.cron | quote }}
+            - name: DIGEST_EXPIRES_SECONDS
+              value: {{ .Values.scheduler.digest.expiresSeconds | quote }}
+            {{- /* Pas d'accès Redis : beat n'a pas de result backend. */}}
+            {{- include "orderflow.secretEnv" (dict "root" $ "redis" false) | nindent 12 }}
+          # Beat touches /tmp/beat-heartbeat on every tick of its loop (at least every 10 s,
+          # see probes.py): no "celery inspect".
+          startupProbe:
+            exec:
+              command: [test, -f, /tmp/beat-heartbeat]
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: [sh, -c, 'find /tmp/beat-heartbeat -newermt "-60 seconds" | grep -q .']
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            # Schedule file (celerybeat-schedule) and heartbeat.
+            {{- include "orderflow.tmpVolumeMount" $ | nindent 12 }}
+      volumes:
+        {{- include "orderflow.tmpVolume" $ | nindent 8 }}

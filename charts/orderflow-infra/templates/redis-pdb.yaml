@@ -1,0 +1,15 @@
+# Au plus un pod Redis volontairement indisponible : il reste toujours 2 sentinels
+# (= quorum) et au moins un réplica pour un failover.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "orderflow-infra.redis.selectorLabels" . | nindent 6 }}

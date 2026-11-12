@@ -1,0 +1,65 @@
+{{- /*
+Prérequis : le CRD RabbitmqCluster (RabbitMQ Cluster Operator, k8s/operators/). On ne
+vérifie que face à un vrai cluster : hors ligne (helm template, helm lint, --dry-run client),
+lookup renvoie toujours vide et les Capabilities sont celles par défaut de Helm.
+*/}}
+{{- if not (.Capabilities.APIVersions.Has "rabbitmq.com/v1beta1/RabbitmqCluster") }}
+{{- if lookup "v1" "Namespace" "" "kube-system" }}
+{{- fail "le CRD rabbitmqclusters.rabbitmq.com (rabbitmq.com/v1beta1) est absent : installer d'abord le RabbitMQ Cluster Operator (kubectl apply --server-side -k k8s/operators/rabbitmq-cluster-operator, ou scripts/deploy-infra.ps1)" }}
+{{- end }}
+{{- end }}
+# Cluster RabbitMQ géré par le RabbitMQ Cluster Operator. L'opérateur crée :
+# StatefulSet/rabbitmq-server, Service/rabbitmq (5672, 15672, 5552, 15692),
+# Service/rabbitmq-nodes (headless) et Secret/rabbitmq-default-user (username/password).
+apiVersion: rabbitmq.com/v1beta1
+kind: RabbitmqCluster
+metadata:
+  name: rabbitmq
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: broker
+spec:
+  replicas: {{ .Values.rabbitmq.replicas }}
+  image: {{ .Values.rabbitmq.image }}
+  resources:
+    {{- toYaml .Values.rabbitmq.resources | nindent 4 }}
+  persistence:
+    {{- with .Values.rabbitmq.persistence.storageClassName }}
+    storageClassName: {{ . }}
+    {{- end }}
+    storage: {{ .Values.rabbitmq.persistence.size }}
+  terminationGracePeriodSeconds: {{ .Values.rabbitmq.terminationGracePeriodSeconds }}
+  # Un seul nœud k8s : rien de "required", sinon les pods 2 et 3 resteraient Pending.
+  # Labels des pods posés par l'opérateur : app.kubernetes.io/name=rabbitmq.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: rabbitmq
+  rabbitmq:
+    additionalPlugins:
+      {{- toYaml .Values.rabbitmq.additionalPlugins | nindent 6 }}
+    additionalConfig: |
+      {{- .Values.rabbitmq.additionalConfig | trim | nindent 6 }}
+  override:
+    statefulSet:
+      spec:
+        template:
+          spec:
+            # "containers" est requis par le schéma de l'override : on référence le
+            # container existant par son nom, sans rien y changer (merge stratégique).
+            containers:
+              - name: rabbitmq
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: rabbitmq

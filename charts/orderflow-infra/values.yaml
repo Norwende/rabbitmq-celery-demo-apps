@@ -1,0 +1,83 @@
+# Valeurs par défaut de orderflow-infra (dimensionnées pour un poste de développement).
+# Les noms des objets sont fixes (rabbitmq, redis, redis-headless, redis-sentinel,
+# redis-auth…, cf. docs/contracts.md) : une seule installation par namespace.
+
+# Domaine DNS du cluster (FQDN des pods Redis : redis-N.redis-headless.<ns>.svc.<domaine>).
+clusterDomain: cluster.local
+
+rabbitmq:
+  image: rabbitmq:4.3.7-management
+  replicas: 3
+  resources:
+    requests:
+      cpu: 100m
+      memory: 400Mi
+    limits:
+      # Pas de limite CPU (évite le throttling d'Erlang). L'opérateur dérive
+      # total_memory_available_override_value de cette limite mémoire.
+      memory: 600Mi
+  persistence:
+    # Vide = StorageClass par défaut du cluster (local-path sur k3s / Rancher Desktop).
+    storageClassName: ""
+    size: 1Gi
+  # Défaut opérateur = 7 jours (attente de la resynchro des quorum queues au preStop).
+  # 5 min suffisent pour une démo sur un seul nœud et ne bloquent pas un rollout raté.
+  terminationGracePeriodSeconds: 300
+  # rabbitmq_management, rabbitmq_prometheus et rabbitmq_peer_discovery_k8s sont activés
+  # d'office par l'opérateur (cf. ConfigMap/rabbitmq-plugins-conf) : seuls les plugins
+  # stream sont à ajouter.
+  additionalPlugins:
+    - rabbitmq_stream
+    - rabbitmq_stream_management
+  # default_queue_type volontairement NON forcé à quorum : c'est le contrat qui impose
+  # x-queue-type=quorum aux files de tâches, et le stream orders.events est déclaré
+  # explicitement. Les files transitoires non exclusives (feature dépréciée) restent
+  # refusées (défaut 4.x) : aucune application n'en crée. consumer_timeout : défaut (30 min).
+  additionalConfig: |
+    # Partition réseau : la minorité se met en pause plutôt que de diverger.
+    cluster_partition_handling = pause_minority
+    # Watermark relatif à total_memory_available_override_value (fixé par l'opérateur
+    # à partir de limits.memory) : alarme mémoire vers ~290 Mi, bien sous la limite cgroup.
+    vm_memory_high_watermark.relative = 0.6
+    # Le PV local partage le disque de l'hôte : seuil absolu modeste.
+    disk_free_limit.absolute = 256MB
+
+redis:
+  image: redis:8.10.3-alpine
+  # 1 master + (replicas - 1) réplicas, un sentinel par pod.
+  replicas: 3
+  # Nom du master surveillé par Sentinel (REDIS_MASTER_NAME côté applications).
+  masterName: orderflow
+  # maxmemory de redis.conf (politique noeviction) : rester bien sous resources.limits.memory.
+  maxmemory: 128mb
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi   # maxmemory 128mb + marge pour fork AOF/RDB et buffers réplicas
+  persistence:
+    # Vide = StorageClass par défaut du cluster.
+    storageClassName: ""
+    size: 1Gi
+  sentinel:
+    # Nombre de sentinels qui doivent constater la panne du master (majorité de replicas).
+    quorum: 2
+    resources:
+      requests:
+        cpu: 20m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+  # Init container qui génère redis.conf / sentinel.conf (files/redis/init.sh).
+  init:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+  auth:
+    # Secret existant (clé "password") à utiliser. Vide : le chart crée Secret/redis-auth
+    # avec un mot de passe aléatoire au premier install, conservé ensuite (lookup).
+    existingSecret: ""

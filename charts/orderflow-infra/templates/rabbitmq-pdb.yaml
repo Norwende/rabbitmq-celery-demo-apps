@@ -1,0 +1,18 @@
+# L'opérateur ne crée pas de PDB : au plus un nœud RabbitMQ volontairement indisponible
+# (les quorum queues à 3 réplicas gardent leur majorité). Sélecteur = labels posés par
+# l'opérateur sur les pods rabbitmq-server-N.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: broker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+      app.kubernetes.io/component: rabbitmq

@@ -1,0 +1,181 @@
+# Redis 1 master + N-1 réplicas avec un sidecar Sentinel par pod.
+# Le rôle de chaque pod est décidé au démarrage par l'init container (files/redis/init.sh) ;
+# ensuite c'est Sentinel qui pilote (failover, reconfiguration des réplicas).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    {{- include "orderflow-infra.labels" . | nindent 4 }}
+    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  replicas: {{ .Values.redis.replicas }}
+  serviceName: redis-headless
+  # OrderedReady : au premier démarrage (ou après un arrêt complet) redis-0 est prêt
+  # avant que redis-1/2 ne cherchent un master -> bootstrap déterministe, jamais deux
+  # pods qui s'auto-proclament master en parallèle. Les rolling updates sont de toute
+  # façon séquentiels (ordinal décroissant).
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  # Marge après Ready avant de passer au pod suivant : les sentinels rafraîchissent
+  # leur vue (INFO) toutes les 10 s.
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      {{- include "orderflow-infra.redis.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orderflow-infra.redis.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/part-of: orderflow
+      annotations:
+        # Un script modifié => nouveau pod template => rolling update (avec preStop).
+        checksum/scripts: {{ include "orderflow-infra.redis.scripts" . | sha256sum }}
+    spec:
+      # Doit couvrir le preStop (attente réplicas sains 15 s + failover 40 s max).
+      terminationGracePeriodSeconds: 75
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999     # utilisateur "redis" de l'image officielle
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "orderflow-infra.redis.selectorLabels" . | nindent 20 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "orderflow-infra.redis.selectorLabels" . | nindent 14 }}
+
+      initContainers:
+        - name: config
+          image: {{ .Values.redis.image }}
+          command: ["sh", "/scripts/init.sh"]
+          env:
+            {{- include "orderflow-infra.redis.scriptEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.redis.init.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: scripts
+              mountPath: /scripts
+
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          # On court-circuite l'entrypoint de l'image : il chargerait les modules Redis 8
+          # (search, json, timeseries, bloom), inutiles ici et coûteux en mémoire.
+          command: ["redis-server", "/config/redis.conf"]
+          env:
+            {{- include "orderflow-infra.redis.cliAuthEnv" . | nindent 12 }}
+            # utilisées par le preStop
+            {{- include "orderflow-infra.redis.scriptEnv" . | nindent 12 }}
+          ports:
+            - name: redis
+              containerPort: 6379
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -h 127.0.0.1 ping | grep -Eq 'PONG|LOADING'"]
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            # LOADING (chargement de l'AOF) n'est pas une panne.
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -h 127.0.0.1 ping | grep -Eq 'PONG|LOADING'"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            # master : PING ; réplica : synchronisé ET vu sain par Sentinel (cf. script).
+            exec:
+              command: ["sh", "/scripts/readiness.sh"]
+            periodSeconds: 5
+            timeoutSeconds: 8
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "/scripts/prestop.sh"]
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+            - name: scripts
+              mountPath: /scripts
+
+        - name: sentinel
+          image: {{ .Values.redis.image }}
+          command: ["redis-sentinel", "/config/sentinel.conf"]
+          env:
+            {{- include "orderflow-infra.redis.cliAuthEnv" . | nindent 12 }}
+          ports:
+            - name: sentinel
+              containerPort: 26379
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -h 127.0.0.1 -p 26379 ping | grep -q PONG"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli --no-auth-warning -h 127.0.0.1 -p 26379 ping | grep -q PONG"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.redis.sentinel.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow-infra.redis.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+
+      volumes:
+        # Configs générées à chaque démarrage de pod, puis réécrites par Redis/Sentinel.
+        - name: config
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: scripts
+          configMap:
+            name: redis-scripts
+            defaultMode: 0555
+
+  # volumeClaimTemplates est immuable : uniquement des labels stables (pas de version de chart).
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "orderflow-infra.redis.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.redis.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}

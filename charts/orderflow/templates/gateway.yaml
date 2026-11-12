@@ -1,0 +1,63 @@
+{{- $ctx := dict "root" $ "name" "gateway" "component" "api" "image" .Values.gateway.image }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "orderflow.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orderflow.podLabels" $ctx | nindent 8 }}
+      annotations:
+        {{- include "orderflow.podAnnotations" $ctx | nindent 8 }}
+    spec:
+      {{- include "orderflow.podSpecCommon" $ | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: gateway
+          image: {{ include "orderflow.image" $ctx }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            {{- include "orderflow.envFrom" $ | nindent 12 }}
+          env:
+            {{- include "orderflow.secretEnv" (dict "root" $ "redis" true) | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            {{- include "orderflow.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            {{- include "orderflow.tmpVolumeMount" $ | nindent 12 }}
+      volumes:
+        {{- include "orderflow.tmpVolume" $ | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    {{- include "orderflow.labels" $ctx | nindent 4 }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "orderflow.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http

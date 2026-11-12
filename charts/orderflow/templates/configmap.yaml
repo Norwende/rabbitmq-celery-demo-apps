@@ -1,0 +1,11 @@
+# Configuration commune à toutes les applications (cf. docs/contracts.md §2).
+# Les secrets (RABBITMQ_USER/PASSWORD, REDIS_PASSWORD) viennent de
+# Secret/rabbitmq-default-user et Secret/redis-auth (release orderflow-infra), pas d'ici.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orderflow-config
+  labels:
+    {{- include "orderflow.labels" (dict "root" $ "name" "orderflow-config" "component" "config") | nindent 4 }}
+data:
+  {{- include "orderflow.configData" . | nindent 2 }}
